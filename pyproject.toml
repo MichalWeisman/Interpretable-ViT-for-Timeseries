@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interpretable-ts-vit"
+version = "0.1.0"
+description = "Interpretable ViT baseline for irregular multivariable clinical time series."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.23",
+  "pandas>=1.5",
+  "torch>=2.0",
+  "scikit-learn>=1.2",
+  "matplotlib>=3.6",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+explain = ["captum>=0.7"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+tsvit = "interpretable_ts_vit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
