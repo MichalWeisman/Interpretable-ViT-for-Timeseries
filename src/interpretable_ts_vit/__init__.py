@@ -29,6 +29,22 @@ def __getattr__(name):
         from .visualization import plot_explanation_heatmap
 
         return plot_explanation_heatmap
+    if name in {"MIMICIVHypotensionAdapter", "MIMICHypotensionConfig"}:
+        from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
+
+        return {
+            "MIMICIVHypotensionAdapter": MIMICIVHypotensionAdapter,
+            "MIMICHypotensionConfig": MIMICHypotensionConfig,
+        }[name]
+    if name in {"PipelinePaths", "PipelineResult", "PipelineRunConfig", "run_pipeline"}:
+        from .pipeline import PipelinePaths, PipelineResult, PipelineRunConfig, run_pipeline
+
+        return {
+            "PipelinePaths": PipelinePaths,
+            "PipelineResult": PipelineResult,
+            "PipelineRunConfig": PipelineRunConfig,
+            "run_pipeline": run_pipeline,
+        }[name]
     raise AttributeError(name)
 
 __all__ = [
@@ -39,6 +55,12 @@ __all__ = [
     "cluster_explanations",
     "explain_model",
     "load_config",
+    "MIMICIVHypotensionAdapter",
+    "MIMICHypotensionConfig",
+    "PipelinePaths",
+    "PipelineResult",
+    "PipelineRunConfig",
     "plot_explanation_heatmap",
+    "run_pipeline",
     "train_model",
 ]

@@ -15,6 +15,7 @@ from .binning import TimeSeriesBinner
 from .clustering import cluster_explanations
 from .config import load_config
 from .data import BinnedTimeSeriesDataset
+from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
 from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
@@ -32,6 +33,18 @@ def main(argv: list[str] | None = None) -> None:
     prepare.add_argument("--labels", required=True)
     prepare.add_argument("--out", required=True)
     prepare.add_argument("--config")
+
+    mimic = sub.add_parser("prepare-mimic-hypotension")
+    mimic.add_argument("--mimic-path", required=True, help="Path to MIMIC-IV zip archive or extracted directory.")
+    mimic.add_argument("--out", required=True, help="Directory for records.csv, labels.csv, and metadata.")
+    mimic.add_argument("--observation-hours", type=float, default=24.0)
+    mimic.add_argument("--prediction-hours", type=float, default=6.0)
+    mimic.add_argument("--threshold", type=float, default=65.0, help="MAP threshold in mmHg for hypotension.")
+    mimic.add_argument("--chunk-size", type=int, default=1_000_000)
+    mimic.add_argument("--max-stays", type=int)
+    mimic.add_argument("--min-observations", type=int, default=1)
+    mimic.add_argument("--allow-short-prediction-window", action="store_true")
+    mimic.add_argument("--allow-missing-outcome-measurement", action="store_true")
 
     train = sub.add_parser("train")
     train.add_argument("--data", required=True)
@@ -57,6 +70,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.command == "prepare-data":
         cmd_prepare_data(args)
+    elif args.command == "prepare-mimic-hypotension":
+        cmd_prepare_mimic_hypotension(args)
     elif args.command == "train":
         cmd_train(args)
     elif args.command == "explain":
@@ -102,6 +117,23 @@ def cmd_prepare_data(args) -> None:
     save_metadata(out, binner)
     with (out / "splits.json").open("w", encoding="utf-8") as fh:
         json.dump(split_ids, fh, indent=2)
+
+
+def cmd_prepare_mimic_hypotension(args) -> None:
+    """Create generic records/labels files for MIMIC-IV hypotension prediction."""
+    config = MIMICHypotensionConfig(
+        mimic_path=args.mimic_path,
+        observation_hours=args.observation_hours,
+        prediction_hours=args.prediction_hours,
+        hypotension_threshold=args.threshold,
+        chunk_size=args.chunk_size,
+        max_stays=args.max_stays,
+        min_observations=args.min_observations,
+        require_full_prediction_window=not args.allow_short_prediction_window,
+        require_outcome_measurement=not args.allow_missing_outcome_measurement,
+    )
+    prepared = MIMICIVHypotensionAdapter(config).prepare()
+    prepared.save(args.out)
 
 
 def cmd_train(args) -> None:

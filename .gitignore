@@ -6,3 +6,6 @@ build/
 dist/
 runs/
 data/processed/
+data/mimic_hypotension/
+mimic-iv-*.zip
+mimic-iv-*/
