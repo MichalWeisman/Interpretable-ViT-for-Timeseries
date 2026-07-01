@@ -41,6 +41,10 @@ def main(argv: list[str] | None = None) -> None:
     mimic.add_argument("--prediction-hours", type=float, default=6.0)
     mimic.add_argument("--threshold", type=float, default=65.0, help="MAP threshold in mmHg for hypotension.")
     mimic.add_argument("--chunk-size", type=int, default=1_000_000)
+    mimic.add_argument("--cache-dir", default="data/mimic_cache")
+    mimic.add_argument("--read-zip-directly", action="store_true", help="Do not extract selected .csv.gz files before reading.")
+    mimic.add_argument("--no-filtered-cache", action="store_true", help="Do not read/write the filtered chartevents Parquet cache.")
+    mimic.add_argument("--progress-interval-chunks", type=int, default=1)
     mimic.add_argument("--max-stays", type=int)
     mimic.add_argument("--min-observations", type=int, default=1)
     mimic.add_argument("--allow-short-prediction-window", action="store_true")
@@ -127,6 +131,10 @@ def cmd_prepare_mimic_hypotension(args) -> None:
         prediction_hours=args.prediction_hours,
         hypotension_threshold=args.threshold,
         chunk_size=args.chunk_size,
+        cache_dir=args.cache_dir,
+        use_extracted_files=not args.read_zip_directly,
+        use_filtered_cache=not args.no_filtered_cache,
+        progress_interval_chunks=args.progress_interval_chunks,
         max_stays=args.max_stays,
         min_observations=args.min_observations,
         require_full_prediction_window=not args.allow_short_prediction_window,

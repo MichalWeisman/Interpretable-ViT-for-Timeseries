@@ -47,6 +47,7 @@ def test_mimic_hypotension_adapter_builds_generic_records_and_labels(tmp_path):
         variable_itemids={"heart_rate": [220045]},
         outcome_itemids=[220052],
         chunk_size=2,
+        cache_dir=tmp_path / "cache",
     )
     prepared = MIMICIVHypotensionAdapter(config).prepare()
 
@@ -58,6 +59,7 @@ def test_mimic_hypotension_adapter_builds_generic_records_and_labels(tmp_path):
         {"patient_id": "200", "label": "false"},
     ]
     assert prepared.metadata["n_labeled_stays"] == 2
+    assert (tmp_path / "cache" / "extracted" / "icu" / "chartevents.csv.gz").exists()
 
 
 def test_prepared_dataset_save_writes_expected_files(tmp_path):
@@ -80,6 +82,7 @@ def test_prepared_dataset_save_writes_expected_files(tmp_path):
         mimic_path=zip_path,
         variable_itemids={"heart_rate": [220045]},
         outcome_itemids=[220052],
+        cache_dir=tmp_path / "cache",
     )
     prepared = MIMICIVHypotensionAdapter(config).prepare()
     prepared.save(tmp_path / "prepared")

@@ -46,6 +46,10 @@ MIMIC_SETTINGS = {
     "prediction_hours": 6.0,
     "hypotension_threshold": 65.0,
     "chunk_size": 1_000_000,
+    "cache_dir": ROOT / "data" / "mimic_cache",
+    "use_extracted_files": True,
+    "use_filtered_cache": True,
+    "progress_interval_chunks": 1,
     # Keep None for the full dataset. Set a small integer, e.g. 1000, for a
     # quick local smoke run.
     "max_stays": None,

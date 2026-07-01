@@ -1,5 +1,6 @@
 __pycache__/
 .pytest_cache/
+.matplotlib/
 *.py[cod]
 *.egg-info/
 build/
@@ -7,5 +8,6 @@ dist/
 runs/
 data/processed/
 data/mimic_hypotension/
+data/mimic_cache/
 mimic-iv-*.zip
 mimic-iv-*/

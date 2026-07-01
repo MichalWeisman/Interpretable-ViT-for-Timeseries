@@ -47,7 +47,9 @@ tsvit prepare-mimic-hypotension `
   --out data/mimic_hypotension `
   --observation-hours 24 `
   --prediction-hours 6 `
-  --threshold 65
+  --threshold 65 `
+  --chunk-size 1000000 `
+  --cache-dir data/mimic_cache
 ```
 
 Each row in `labels.csv` corresponds to an ICU `stay_id`. By default, the label
@@ -59,6 +61,66 @@ MIMIC-IV dates are deidentified with patient-specific shifts, so the adapter
 exports timestamps as relative ICU time anchored at `2000-01-01 00:00:00`.
 That makes columns in the ViT input represent time since ICU admission rather
 than incomparable absolute calendar dates.
+
+### MIMIC Cache
+
+The cache is an intermediate speed-up layer. It is **not** the model input and
+it is **not** the tensor dataset. You can delete it and regenerate it from the
+MIMIC zip.
+
+By default, `--cache-dir data/mimic_cache` contains two kinds of files:
+
+```text
+data/mimic_cache/
+  extracted/
+    icu/
+      icustays.csv.gz
+      chartevents.csv.gz
+  chartevents_filtered_<hash>.parquet
+```
+
+`extracted/` contains selected raw MIMIC `.csv.gz` files copied out of the big
+zip. This avoids repeatedly reading compressed files through the zip container.
+It does **not** extract the whole MIMIC archive.
+
+`chartevents_filtered_<hash>.parquet` is a filtered cache built from
+`chartevents.csv.gz`. It contains only:
+
+- eligible ICU `stay_id`s for the configured observation/prediction windows
+- relevant MIMIC `itemid`s used as model variables or hypotension outcomes
+- numeric chart values from `valuenum`
+- the raw `charttime`, `stay_id`, `itemid`, and `valuenum` columns
+
+The hash in the filename changes when the eligible cohort or selected item IDs
+change, so incompatible runs do not accidentally reuse the wrong filtered
+events.
+
+While scanning raw `chartevents.csv.gz`, the adapter prints a progress bar with
+percentage and ETA. The percentage is estimated from compressed bytes consumed,
+not from a pre-counted number of rows, so it avoids an extra full scan while
+still giving a practical time-left estimate.
+
+The portable pre-tensor output is still:
+
+```text
+data/mimic_hypotension/
+  records.csv
+  labels.csv
+  dataset_metadata.json
+```
+
+If you create data on one computer and train on another, copy
+`data/mimic_hypotension/`. You usually do not need to copy `data/mimic_cache/`.
+
+To disable cache behavior:
+
+```powershell
+tsvit prepare-mimic-hypotension `
+  --mimic-path mimic-iv-3.1.zip `
+  --out data/mimic_hypotension `
+  --read-zip-directly `
+  --no-filtered-cache
+```
 
 After creating the MIMIC records and labels, run:
 
