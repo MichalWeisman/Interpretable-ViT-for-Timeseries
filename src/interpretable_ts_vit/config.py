@@ -65,6 +65,7 @@ class ClusterConfig:
     method: str = "kmeans"
     aggregate: str = "mean"
     plot_mode: str = "value_with_importance_opacity"
+    importance_threshold: float | None = None
 
 
 @dataclass

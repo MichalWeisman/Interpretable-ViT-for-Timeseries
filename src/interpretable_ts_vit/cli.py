@@ -73,6 +73,11 @@ def main(argv: list[str] | None = None) -> None:
     plot.add_argument("--instances", action="store_true")
     plot.add_argument("--config")
     plot.add_argument("--plot-mode", choices=["value", "value_with_importance_opacity", "value_with_importance_border"])
+    plot.add_argument(
+        "--importance-threshold",
+        type=float,
+        help="Optional importance quantile in [0, 1]; for example, 0.8 shows only the top 20%% most important cells.",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "prepare-data":
@@ -211,6 +216,7 @@ def cmd_plot(args) -> None:
     run = Path(args.run)
     config = load_config(args.config).cluster
     plot_mode = args.plot_mode or config.plot_mode
+    importance_threshold = args.importance_threshold if args.importance_threshold is not None else config.importance_threshold
     binner = TimeSeriesBinner.load(run / "binner.json")
     dataset = load_split(run / f"{args.split}.npz")
     assignments_path = run / "clusters" / args.split / "cluster_assignments.csv"
@@ -235,6 +241,7 @@ def cmd_plot(args) -> None:
                 vmax=vmax,
                 importance_matrix=importance_by_cluster.get(cluster),
                 importance_style=importance_style or "opacity",
+                importance_threshold=importance_threshold,
             )
     if args.instances:
         instance_dir = run / "instance_heatmaps" / args.split

@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from interpretable_ts_vit import TimeSeriesBinner
 from interpretable_ts_vit.clustering import cluster_explanations
@@ -89,6 +90,7 @@ def test_importance_clustering_and_value_importance_opacity(tmp_path):
             binner.time_bins_,
             tmp_path / f"overlay_{cluster}.png",
             importance_matrix=clustered["aggregates"][cluster],
+            importance_threshold=0.8,
         )
         plot_value_heatmap(
             value_matrix,
@@ -97,6 +99,22 @@ def test_importance_clustering_and_value_importance_opacity(tmp_path):
             tmp_path / f"border_{cluster}.png",
             importance_matrix=clustered["aggregates"][cluster],
             importance_style="border",
+            importance_threshold=0.8,
         )
     assert any(tmp_path.glob("overlay_*.png"))
     assert any(tmp_path.glob("border_*.png"))
+
+
+def test_importance_threshold_must_be_quantile(tmp_path):
+    matrix = np.array([[1.0, 2.0]])
+    importance = np.array([[0.2, 0.8]])
+
+    with pytest.raises(ValueError, match="importance_threshold"):
+        plot_value_heatmap(
+            matrix,
+            ["heart_rate"],
+            ["2026-01-01 00:00:00", "2026-01-01 01:00:00"],
+            tmp_path / "bad_threshold.png",
+            importance_matrix=importance,
+            importance_threshold=1.5,
+        )

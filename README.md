@@ -60,6 +60,7 @@ Visual encoding:
 - blue = lower value
 - red = higher value
 - opacity or border width = mean model importance
+- optional importance threshold = only the most important cells are emphasized
 - gray = no observations for that variable/time cell
 
 The colorbar is labeled `Mean Observed Value`. It intentionally has no numeric
@@ -84,10 +85,25 @@ Configure the default behavior with:
 cluster:
   n_clusters: 8
   plot_mode: value_with_importance_opacity
+  importance_threshold: null
 ```
 
 Set `plot_mode: value_with_importance_border` if you prefer border width,
 instead of opacity, to encode importance.
+
+Set `importance_threshold` to a quantile between `0` and `1` to emphasize only
+the most important regions. For example, `importance_threshold: 0.8` keeps
+visual emphasis only for cells at or above the 80th percentile of the cluster's
+finite importance scores. In opacity mode, cells below the threshold fade to
+the minimum opacity; in border mode, cells below the threshold do not receive an
+importance border. The threshold does not change the clinical value colors or
+the clustering itself.
+
+The same option is available from the CLI:
+
+```powershell
+tsvit plot --run runs/example --importance-threshold 0.8
+```
 
 This default answers:
 

@@ -107,7 +107,13 @@ def run_pipeline(run_config: PipelineRunConfig | None = None) -> PipelineResult:
         artifacts["clusters"] = str(Path(paths.run_dir) / "clusters" / run_config.split)
 
     if run_config.plot:
-        _plot_and_save(paths.run_dir, run_config.split, run_config.render_instance_heatmaps, config.cluster.plot_mode)
+        _plot_and_save(
+            paths.run_dir,
+            run_config.split,
+            run_config.render_instance_heatmaps,
+            config.cluster.plot_mode,
+            config.cluster.importance_threshold,
+        )
         artifacts["cluster_heatmaps"] = str(Path(paths.run_dir) / "cluster_heatmaps" / run_config.split)
         artifacts["cluster_values"] = str(Path(paths.run_dir) / "cluster_values" / run_config.split)
 
@@ -226,7 +232,13 @@ def _cluster_and_save(config: Config, run_dir: str | Path, split: str) -> None:
     )
 
 
-def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bool, plot_mode: str = "value_with_importance_opacity") -> None:
+def _plot_and_save(
+    run_dir: str | Path,
+    split: str,
+    render_instance_heatmaps: bool,
+    plot_mode: str = "value_with_importance_opacity",
+    importance_threshold: float | None = None,
+) -> None:
     run_dir = Path(run_dir)
     binner = TimeSeriesBinner.load(run_dir / "binner.json")
     dataset = load_split(run_dir / f"{split}.npz")
@@ -252,6 +264,7 @@ def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bo
                 vmax=vmax,
                 importance_matrix=importance_by_cluster.get(cluster),
                 importance_style=importance_style or "opacity",
+                importance_threshold=importance_threshold,
             )
     if render_instance_heatmaps:
         instance_dir = run_dir / "instance_heatmaps" / split

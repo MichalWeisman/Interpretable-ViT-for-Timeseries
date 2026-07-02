@@ -113,6 +113,7 @@ def plot_value_heatmap(
     importance_matrix: np.ndarray | None = None,
     importance_style: str = "opacity",
     min_importance_alpha: float = 0.15,
+    importance_threshold: float | None = None,
 ) -> None:
     """Save a variable-by-time heatmap of mean observed clinical values.
 
@@ -121,10 +122,13 @@ def plot_value_heatmap(
     encoding: `"opacity"` makes important cells more opaque, while `"border"`
     uses thicker cell borders for more important cells. The colorbar
     intentionally has no numeric ticks because variables can have different
-    clinical units.
+    clinical units. `importance_threshold` is an optional quantile in `[0, 1]`;
+    for example, `0.8` emphasizes only cells at or above the 80th percentile
+    of finite importance scores.
     """
     if importance_style not in {"opacity", "border"}:
         raise ValueError("importance_style must be either 'opacity' or 'border'.")
+    _validate_importance_threshold(importance_threshold)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig_width = max(8, min(24, len(time_bins) * 0.28))
@@ -132,10 +136,14 @@ def plot_value_heatmap(
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     cmap = plt.get_cmap("coolwarm").with_extremes(bad="#d9d9d9")
     importance = np.asarray(importance_matrix) if importance_matrix is not None else None
-    alpha = _importance_alpha(importance, matrix, min_importance_alpha) if importance is not None and importance_style == "opacity" else None
+    alpha = (
+        _importance_alpha(importance, matrix, min_importance_alpha, importance_threshold)
+        if importance is not None and importance_style == "opacity"
+        else None
+    )
     image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax, alpha=alpha)
     if importance is not None and importance_style == "border":
-        _draw_importance_borders(ax, importance, matrix)
+        _draw_importance_borders(ax, importance, matrix, importance_threshold)
     ax.set_yticks(np.arange(len(variables)))
     ax.set_yticklabels(variables)
     positions, labels, granularity = _relative_time_ticks(time_bins)
@@ -152,6 +160,8 @@ def plot_value_heatmap(
     colorbar.ax.text(0.5, 1.02, "High", transform=colorbar.ax.transAxes, ha="center", va="bottom")
     if importance_matrix is not None:
         label = "opacity: model importance" if importance_style == "opacity" else "border width: model importance"
+        if importance_threshold is not None:
+            label = f"{label} (top {int(round((1.0 - importance_threshold) * 100))}%)"
         ax.text(
             0.99,
             1.01,
@@ -192,34 +202,75 @@ def _format_timedelta(delta) -> str:
     return f"{total_seconds}s"
 
 
-def _importance_alpha(importance_matrix: np.ndarray, value_matrix: np.ndarray, min_alpha: float) -> np.ndarray:
+def _validate_importance_threshold(importance_threshold: float | None) -> None:
+    if importance_threshold is None:
+        return
+    if not 0.0 <= importance_threshold <= 1.0:
+        raise ValueError("importance_threshold must be a quantile between 0 and 1.")
+
+
+def _importance_cutoff(importance_matrix: np.ndarray, importance_threshold: float | None) -> float | None:
+    if importance_threshold is None:
+        return None
+    finite = importance_matrix[np.isfinite(importance_matrix)]
+    if finite.size == 0:
+        return None
+    return float(np.quantile(finite, importance_threshold))
+
+
+def _importance_alpha(
+    importance_matrix: np.ndarray,
+    value_matrix: np.ndarray,
+    min_alpha: float,
+    importance_threshold: float | None,
+) -> np.ndarray:
     alpha = np.ones_like(value_matrix, dtype=np.float64)
     if importance_matrix.shape != value_matrix.shape:
         return alpha
-    finite = importance_matrix[np.isfinite(importance_matrix)]
+    cutoff = _importance_cutoff(importance_matrix, importance_threshold)
+    finite_mask = np.isfinite(importance_matrix)
+    if cutoff is not None:
+        finite_mask &= importance_matrix >= cutoff
+    finite = importance_matrix[finite_mask]
     if finite.size == 0:
         return alpha
     low = float(np.nanmin(finite))
     high = float(np.nanmax(finite))
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        alpha[:] = min_alpha
+        alpha[finite_mask] = 1.0
+        alpha[~np.isfinite(value_matrix)] = 1.0
         return alpha
     scaled = (importance_matrix - low) / (high - low)
     alpha = min_alpha + (1.0 - min_alpha) * np.clip(scaled, 0.0, 1.0)
+    if cutoff is not None:
+        alpha[~finite_mask] = min_alpha
     alpha[~np.isfinite(value_matrix)] = 1.0
     return alpha
 
 
-def _draw_importance_borders(ax, importance_matrix: np.ndarray, value_matrix: np.ndarray) -> None:
+def _draw_importance_borders(
+    ax,
+    importance_matrix: np.ndarray,
+    value_matrix: np.ndarray,
+    importance_threshold: float | None,
+) -> None:
     if importance_matrix.shape != value_matrix.shape:
         return
-    finite = importance_matrix[np.isfinite(importance_matrix)]
+    cutoff = _importance_cutoff(importance_matrix, importance_threshold)
+    finite_mask = np.isfinite(importance_matrix)
+    if cutoff is not None:
+        finite_mask &= importance_matrix >= cutoff
+    finite = importance_matrix[finite_mask]
     if finite.size == 0:
         return
     low = float(np.nanmin(finite))
     high = float(np.nanmax(finite))
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
-        return
-    scaled = np.clip((importance_matrix - low) / (high - low), 0.0, 1.0)
+        scaled = np.where(finite_mask, 1.0, np.nan)
+    else:
+        scaled = np.clip((importance_matrix - low) / (high - low), 0.0, 1.0)
+        scaled[~finite_mask] = np.nan
     for row in range(value_matrix.shape[0]):
         for col in range(value_matrix.shape[1]):
             if not np.isfinite(value_matrix[row, col]) or not np.isfinite(scaled[row, col]):
