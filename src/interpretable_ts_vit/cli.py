@@ -66,17 +66,13 @@ def main(argv: list[str] | None = None) -> None:
     cluster.add_argument("--split", default="test")
     cluster.add_argument("--n-clusters", type=int)
     cluster.add_argument("--config")
-    cluster.add_argument("--feature-mode", choices=["explanation", "value", "combined"])
-    cluster.add_argument("--value-weight", type=float)
-    cluster.add_argument("--explanation-weight", type=float)
-    cluster.add_argument("--mask-weight", type=float)
 
     plot = sub.add_parser("plot")
     plot.add_argument("--run", required=True)
     plot.add_argument("--split", default="test")
     plot.add_argument("--instances", action="store_true")
     plot.add_argument("--config")
-    plot.add_argument("--plot-mode", choices=["value", "value_with_importance_overlay"])
+    plot.add_argument("--plot-mode", choices=["value", "value_with_importance_opacity"])
 
     args = parser.parse_args(argv)
     if args.command == "prepare-data":
@@ -195,11 +191,10 @@ def cmd_explain(args) -> None:
 
 
 def cmd_cluster(args) -> None:
-    """Cluster patients using explanation, value, or combined feature vectors."""
+    """Cluster patients by model-importance maps."""
     run = Path(args.run)
     config = load_config(args.config).cluster
     n_clusters = args.n_clusters or config.n_clusters
-    dataset = load_split(run / f"{args.split}.npz")
     explanation_dir = run / "explanations" / args.split
     out = run / "clusters" / args.split
     cluster_explanations(
@@ -208,11 +203,6 @@ def cmd_cluster(args) -> None:
         method=config.method,
         aggregate=config.aggregate,
         output_dir=out,
-        dataset=dataset,
-        feature_mode=args.feature_mode or config.feature_mode,
-        value_weight=args.value_weight if args.value_weight is not None else config.value_weight,
-        explanation_weight=args.explanation_weight if args.explanation_weight is not None else config.explanation_weight,
-        mask_weight=args.mask_weight if args.mask_weight is not None else config.mask_weight,
     )
 
 
@@ -228,7 +218,7 @@ def cmd_plot(args) -> None:
     value_dir = run / "cluster_values" / args.split
     heatmap_dir = run / "cluster_heatmaps" / args.split
     matrices_by_cluster = aggregate_cluster_value_matrices(dataset, assignments_path, binner, output_dir=value_dir)
-    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if plot_mode == "value_with_importance_overlay" else {}
+    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if plot_mode == "value_with_importance_opacity" else {}
     matrices = list(matrices_by_cluster.values())
     if matrices:
         vmin = min(float(np.nanmin(matrix)) for matrix in matrices)

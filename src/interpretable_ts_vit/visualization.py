@@ -110,24 +110,24 @@ def plot_value_heatmap(
     vmin: float | None = None,
     vmax: float | None = None,
     importance_matrix: np.ndarray | None = None,
-    importance_quantile: float = 0.75,
+    min_importance_alpha: float = 0.15,
 ) -> None:
     """Save a variable-by-time heatmap of mean observed clinical values.
 
-    If `importance_matrix` is provided, the value heatmap is overlaid with
-    black contours around cells whose mean importance is in the upper
-    `importance_quantile` of finite importance values. Color always represents
-    clinical value; the contour represents model importance.
+    Color represents clinical value using a blue-low to red-high scale. If
+    `importance_matrix` is provided, cell opacity represents model importance:
+    less-important cells are more transparent and highly important cells are
+    more opaque. The colorbar intentionally has no numeric ticks because the
+    variables can have different clinical units.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig_width = max(8, min(24, len(time_bins) * 0.28))
     fig_height = max(4, min(18, len(variables) * 0.32))
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-    cmap = plt.get_cmap("viridis").with_extremes(bad="#d9d9d9")
-    image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
-    if importance_matrix is not None:
-        _draw_importance_contours(ax, np.asarray(importance_matrix), importance_quantile)
+    cmap = plt.get_cmap("coolwarm").with_extremes(bad="#d9d9d9")
+    alpha = _importance_alpha(np.asarray(importance_matrix), matrix, min_importance_alpha) if importance_matrix is not None else None
+    image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax, alpha=alpha)
     ax.set_yticks(np.arange(len(variables)))
     ax.set_yticklabels(variables)
     tick_count = min(10, len(time_bins))
@@ -139,34 +139,39 @@ def plot_value_heatmap(
     ax.set_ylabel("Variable")
     if title:
         ax.set_title(title)
-    fig.colorbar(image, ax=ax, label="Mean observed value")
+    colorbar = fig.colorbar(image, ax=ax, label="Mean observed value: blue low, red high")
+    colorbar.set_ticks([])
+    if importance_matrix is not None:
+        ax.text(
+            0.99,
+            1.01,
+            "opacity: model importance",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="black",
+        )
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
 
 
-def _draw_importance_contours(ax, importance_matrix: np.ndarray, quantile: float) -> None:
-    if importance_matrix.shape[0] < 2 or importance_matrix.shape[1] < 2:
-        return
+def _importance_alpha(importance_matrix: np.ndarray, value_matrix: np.ndarray, min_alpha: float) -> np.ndarray:
+    alpha = np.ones_like(value_matrix, dtype=np.float64)
+    if importance_matrix.shape != value_matrix.shape:
+        return alpha
     finite = importance_matrix[np.isfinite(importance_matrix)]
     if finite.size == 0:
-        return
-    threshold = float(np.quantile(finite, quantile))
-    if not np.isfinite(threshold) or float(np.nanmax(finite)) <= threshold:
-        return
-    y = np.arange(importance_matrix.shape[0])
-    x = np.arange(importance_matrix.shape[1])
-    ax.contour(x, y, importance_matrix, levels=[threshold], colors="black", linewidths=0.8)
-    ax.text(
-        0.99,
-        1.01,
-        f"black contour: top {int((1 - quantile) * 100)}% importance",
-        transform=ax.transAxes,
-        ha="right",
-        va="bottom",
-        fontsize=8,
-        color="black",
-    )
+        return alpha
+    low = float(np.nanmin(finite))
+    high = float(np.nanmax(finite))
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        return alpha
+    scaled = (importance_matrix - low) / (high - low)
+    alpha = min_alpha + (1.0 - min_alpha) * np.clip(scaled, 0.0, 1.0)
+    alpha[~np.isfinite(value_matrix)] = 1.0
+    return alpha
 
 
 def _read_assignments(assignments: pd.DataFrame | str | Path) -> pd.DataFrame:

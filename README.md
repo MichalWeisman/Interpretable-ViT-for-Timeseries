@@ -34,10 +34,13 @@ tsvit plot --run runs/example
 
 The same functionality is available from Python through `interpretable_ts_vit`.
 
-## Value Heatmaps
+## Importance-Clustered Value Heatmaps
 
-The default plotted heatmaps are **value heatmaps with an optional importance
-overlay**, not plain explanation-score heatmaps.
+The default plotted heatmaps use one interpretation path:
+
+1. Cluster patients by their model-importance maps.
+2. For each cluster, plot the patients' mean observed clinical values.
+3. Use opacity to show where the model was most important.
 
 Each PNG in:
 
@@ -46,10 +49,20 @@ runs/<run_name>/cluster_heatmaps/<split>/
 ```
 
 shows the mean observed clinical value for each variable/time bin among the
-patients assigned to that cluster. Rows are variables in the persisted training
-order, columns are global time bins, and color goes from lower values to higher
-values. In the default `value_with_importance_overlay` mode, black contours
-mark cells with high mean model importance inside that cluster.
+patients assigned to that importance-derived cluster. Rows are variables in the
+persisted training order and columns are global time bins.
+
+Visual encoding:
+
+- color = mean observed clinical value
+- blue = lower value
+- red = higher value
+- opacity = mean model importance
+- gray = no observations for that variable/time cell
+
+The colorbar intentionally has no numeric ticks. Different rows can represent
+different clinical units, so the colorbar should be read as low-to-high within
+the plotted value scale, not as a single shared clinical unit.
 
 The pipeline still may generate explanation maps in:
 
@@ -58,52 +71,21 @@ runs/<run_name>/explanations/<split>/
 ```
 
 Those maps are used to group similar model-reasoning patterns during the
-`cluster` step and to draw the optional black importance contours. They are
-**not** what the default heatmap color represents.
+`cluster` step and to control opacity in the heatmap. They are **not** what the
+heatmap color represents.
 
-## Clustering Modes
-
-The clustering object is always the patient/test instance. What changes is the
-patient-level vector passed to KMeans.
-
-Configure this with `cluster.feature_mode`:
+Configure the default behavior with:
 
 ```yaml
 cluster:
   n_clusters: 8
-  feature_mode: combined
-  plot_mode: value_with_importance_overlay
-  value_weight: 1.0
-  explanation_weight: 1.0
-  mask_weight: 0.25
+  plot_mode: value_with_importance_opacity
 ```
-
-Supported `feature_mode` values:
-
-- `explanation`: cluster patients by flattened explanation matrices only.
-- `value`: cluster patients by flattened normalized value and mask channels.
-- `combined`: cluster patients by concatenating value, mask, and explanation
-  features.
-
-The default is `combined`, which means clusters reflect both:
-
-- similar clinical trajectories in the binned value/mask tensor
-- similar model-reasoning patterns in the explanation map
-
-Before KMeans, each feature block is standardized with `StandardScaler`.
-The block weights are then applied, so you can change the relative contribution
-of value, explanation, and mask blocks.
-
-Supported `plot_mode` values:
-
-- `value`: color only; color means mean observed clinical value.
-- `value_with_importance_overlay`: color means mean observed clinical value,
-  black contours mark high mean importance.
 
 This default answers:
 
-> Which groups of patients have similar clinical trajectories and similar model
-> reasoning patterns, and what do their actual measurements look like?
+> Which patients caused the model to focus on similar variable/time regions,
+> and what were their actual measurements in those regions?
 
 ### How Cluster Values Are Computed
 

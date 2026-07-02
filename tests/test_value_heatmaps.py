@@ -42,7 +42,7 @@ def test_cluster_value_aggregation_uses_observed_raw_values(tmp_path):
     assert (tmp_path / "cluster_0.png").exists()
 
 
-def test_combined_clustering_and_value_importance_overlay(tmp_path):
+def test_importance_clustering_and_value_importance_opacity(tmp_path):
     records = pd.DataFrame(
         [
             {"patient_id": "p1", "variable": "heart_rate", "value": 60.0, "timestamp": "2026-01-01 00:00:00"},
@@ -77,8 +77,6 @@ def test_combined_clustering_and_value_importance_overlay(tmp_path):
         explanations,
         n_clusters=2,
         output_dir=tmp_path / "clusters",
-        dataset=dataset,
-        feature_mode="combined",
     )
     assert set(clustered["assignments"].columns) == {"patient_id", "cluster"}
     assert (tmp_path / "clusters" / "cluster_metadata.json").exists()

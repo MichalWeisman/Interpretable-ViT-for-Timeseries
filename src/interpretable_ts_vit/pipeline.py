@@ -217,22 +217,16 @@ def _explain_and_save(config: Config, run_dir: str | Path, split: str) -> None:
 
 def _cluster_and_save(config: Config, run_dir: str | Path, split: str) -> None:
     run_dir = Path(run_dir)
-    dataset = load_split(run_dir / f"{split}.npz")
     cluster_explanations(
         run_dir / "explanations" / split,
         n_clusters=config.cluster.n_clusters,
         method=config.cluster.method,
         aggregate=config.cluster.aggregate,
         output_dir=run_dir / "clusters" / split,
-        dataset=dataset,
-        feature_mode=config.cluster.feature_mode,
-        value_weight=config.cluster.value_weight,
-        explanation_weight=config.cluster.explanation_weight,
-        mask_weight=config.cluster.mask_weight,
     )
 
 
-def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bool, plot_mode: str = "value_with_importance_overlay") -> None:
+def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bool, plot_mode: str = "value_with_importance_opacity") -> None:
     run_dir = Path(run_dir)
     binner = TimeSeriesBinner.load(run_dir / "binner.json")
     dataset = load_split(run_dir / f"{split}.npz")
@@ -241,7 +235,7 @@ def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bo
     value_dir = run_dir / "cluster_values" / split
     heatmap_dir = run_dir / "cluster_heatmaps" / split
     matrices_by_cluster = aggregate_cluster_value_matrices(dataset, assignments_path, binner, output_dir=value_dir)
-    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if plot_mode == "value_with_importance_overlay" else {}
+    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if plot_mode == "value_with_importance_opacity" else {}
     matrices = list(matrices_by_cluster.values())
     if matrices:
         vmin = min(float(np.nanmin(matrix)) for matrix in matrices)

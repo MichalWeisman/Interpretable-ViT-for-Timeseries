@@ -93,11 +93,7 @@ PIPELINE_CONFIG = Config(
         n_clusters=8,
         method="kmeans",
         aggregate="mean",
-        feature_mode="combined",
-        plot_mode="value_with_importance_overlay",
-        value_weight=1.0,
-        explanation_weight=1.0,
-        mask_weight=0.25,
+        plot_mode="value_with_importance_opacity",
     ),
 )
 
