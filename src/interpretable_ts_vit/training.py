@@ -38,6 +38,15 @@ def train_model(
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     criterion = nn.CrossEntropyLoss()
     history: list[dict[str, float]] = []
+    early_stopping_patience = getattr(config, "early_stopping_patience", None)
+    monitor = getattr(config, "early_stopping_monitor", "val_loss")
+    min_delta = float(getattr(config, "early_stopping_min_delta", 0.0))
+    mode = _resolve_monitor_mode(monitor, getattr(config, "early_stopping_mode", "auto"))
+    restore_best_model = bool(getattr(config, "restore_best_model", True))
+    best_value: float | None = None
+    best_epoch: int | None = None
+    best_state: dict[str, torch.Tensor] | None = None
+    bad_epochs = 0
     for epoch in range(config.epochs):
         model.train()
         losses = []
@@ -50,11 +59,37 @@ def train_model(
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
         row = {"epoch": float(epoch + 1), "train_loss": float(np.mean(losses))}
+        improved_this_epoch = False
         if val_dataset is not None:
+            row["val_loss"] = evaluate_loss(model, val_dataset, config, criterion)
             row.update({f"val_{k}": v for k, v in evaluate_model(model, val_dataset, config).items() if isinstance(v, float)})
+        if val_dataset is not None and monitor in row:
+            current = float(row[monitor])
+            if best_value is None or _is_improvement(current, best_value, mode, min_delta):
+                best_value = current
+                best_epoch = epoch + 1
+                bad_epochs = 0
+                best_state = _copy_state_dict_to_cpu(model)
+                improved_this_epoch = True
+            else:
+                bad_epochs += 1
+        elif val_dataset is not None and early_stopping_patience is not None:
+            available = ", ".join(sorted(row))
+            raise ValueError(f"early_stopping_monitor '{monitor}' is not available. Available metrics: {available}")
         history.append(row)
+        if early_stopping_patience is not None and val_dataset is not None and not improved_this_epoch and bad_epochs >= early_stopping_patience:
+            break
+    if restore_best_model and best_state is not None:
+        model.load_state_dict(best_state)
+        model.to(device)
     metrics = evaluate_model(model, val_dataset or train_dataset, config)
     metrics["history"] = history
+    metrics["epochs_ran"] = len(history)
+    metrics["stopped_early"] = len(history) < config.epochs
+    if best_epoch is not None:
+        metrics["best_epoch"] = best_epoch
+        metrics["best_monitor"] = monitor
+        metrics["best_monitor_value"] = best_value
     if output_dir is not None:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -62,6 +97,33 @@ def train_model(
         with (out / "metrics.json").open("w", encoding="utf-8") as fh:
             json.dump(_jsonable(metrics), fh, indent=2)
     return metrics
+
+
+@torch.no_grad()
+def evaluate_loss(
+    model: nn.Module,
+    dataset: BinnedTimeSeriesDataset,
+    config: TrainConfig | None = None,
+    criterion: nn.Module | None = None,
+) -> float:
+    """Compute average cross-entropy loss over a labeled dataset."""
+    config = config or TrainConfig()
+    device = resolve_device(config.device)
+    model.to(device)
+    model.eval()
+    loader = DataLoader(dataset, batch_size=config.batch_size)
+    criterion = criterion or nn.CrossEntropyLoss()
+    total_loss = 0.0
+    total_examples = 0
+    for x, y in loader:
+        x = x.to(device)
+        y = y.to(device)
+        batch_size = int(y.shape[0])
+        total_loss += float(criterion(model(x), y).detach().cpu()) * batch_size
+        total_examples += batch_size
+    if total_examples == 0:
+        raise ValueError("Cannot evaluate loss on an empty dataset.")
+    return total_loss / total_examples
 
 
 @torch.no_grad()
@@ -103,6 +165,26 @@ def evaluate_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: T
     except ValueError:
         metrics["auroc"] = None
     return metrics
+
+
+def _resolve_monitor_mode(monitor: str, mode: str) -> str:
+    if mode not in {"auto", "min", "max"}:
+        raise ValueError("early_stopping_mode must be 'auto', 'min', or 'max'.")
+    if mode != "auto":
+        return mode
+    return "min" if monitor.endswith("loss") else "max"
+
+
+def _is_improvement(current: float, best: float, mode: str, min_delta: float) -> bool:
+    if not np.isfinite(current):
+        return False
+    if mode == "min":
+        return current < best - min_delta
+    return current > best + min_delta
+
+
+def _copy_state_dict_to_cpu(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
 def _jsonable(value: Any) -> Any:

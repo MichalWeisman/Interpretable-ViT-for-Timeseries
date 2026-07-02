@@ -320,9 +320,22 @@ train:
   batch_size: 16
   epochs: 10
   learning_rate: 0.001
+  early_stopping_patience: 3
+  early_stopping_monitor: val_loss
+  early_stopping_min_delta: 0.0
+  early_stopping_mode: auto
+  restore_best_model: true
 cluster:
   n_clusters: 8
 ```
+
+Early stopping is optional. Leave `early_stopping_patience` as `null` to train
+for the full number of epochs. When a validation split is available, each epoch
+records `val_loss` plus validation metrics in `metrics.json`. With
+`restore_best_model: true`, the saved `model.pt` uses the best validation
+checkpoint according to `early_stopping_monitor`; `val_loss` is minimized, while
+metrics such as `val_macro_f1`, `val_accuracy`, and `val_auroc` are maximized
+when `early_stopping_mode: auto`.
 
 ## Python Usage
 

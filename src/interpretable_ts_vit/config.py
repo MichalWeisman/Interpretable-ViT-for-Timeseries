@@ -47,6 +47,11 @@ class TrainConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     device: str = "auto"
+    early_stopping_patience: int | None = None
+    early_stopping_monitor: str = "val_loss"
+    early_stopping_min_delta: float = 0.0
+    early_stopping_mode: str = "auto"
+    restore_best_model: bool = True
 
 
 @dataclass
