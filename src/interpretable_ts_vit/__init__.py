@@ -25,10 +25,14 @@ def __getattr__(name):
         from .training import train_model
 
         return train_model
-    if name == "plot_explanation_heatmap":
-        from .visualization import plot_explanation_heatmap
+    if name in {"aggregate_cluster_value_matrices", "plot_explanation_heatmap", "plot_value_heatmap"}:
+        from .visualization import aggregate_cluster_value_matrices, plot_explanation_heatmap, plot_value_heatmap
 
-        return plot_explanation_heatmap
+        return {
+            "aggregate_cluster_value_matrices": aggregate_cluster_value_matrices,
+            "plot_explanation_heatmap": plot_explanation_heatmap,
+            "plot_value_heatmap": plot_value_heatmap,
+        }[name]
     if name in {"MIMICIVHypotensionAdapter", "MIMICHypotensionConfig"}:
         from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
 
@@ -52,6 +56,7 @@ __all__ = [
     "TimeSeriesBinner",
     "ViTConfig",
     "ViTTimeSeriesClassifier",
+    "aggregate_cluster_value_matrices",
     "cluster_explanations",
     "explain_model",
     "load_config",
@@ -61,6 +66,7 @@ __all__ = [
     "PipelineResult",
     "PipelineRunConfig",
     "plot_explanation_heatmap",
+    "plot_value_heatmap",
     "run_pipeline",
     "train_model",
 ]

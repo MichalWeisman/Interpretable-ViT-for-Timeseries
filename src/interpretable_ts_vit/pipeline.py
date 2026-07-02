@@ -20,7 +20,7 @@ from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
 from .training import evaluate_model, predict_model, train_model
-from .visualization import plot_explanation_heatmap
+from .visualization import aggregate_cluster_value_matrices, plot_value_heatmap
 
 
 @dataclass
@@ -107,8 +107,9 @@ def run_pipeline(run_config: PipelineRunConfig | None = None) -> PipelineResult:
         artifacts["clusters"] = str(Path(paths.run_dir) / "clusters" / run_config.split)
 
     if run_config.plot:
-        _plot_and_save(paths.run_dir, run_config.split, run_config.render_instance_heatmaps)
+        _plot_and_save(paths.run_dir, run_config.split, run_config.render_instance_heatmaps, config.cluster.plot_mode)
         artifacts["cluster_heatmaps"] = str(Path(paths.run_dir) / "cluster_heatmaps" / run_config.split)
+        artifacts["cluster_values"] = str(Path(paths.run_dir) / "cluster_values" / run_config.split)
 
     return PipelineResult(artifacts=artifacts, train_metrics=train_metrics, evaluation_metrics=evaluation_metrics)
 
@@ -216,53 +217,86 @@ def _explain_and_save(config: Config, run_dir: str | Path, split: str) -> None:
 
 def _cluster_and_save(config: Config, run_dir: str | Path, split: str) -> None:
     run_dir = Path(run_dir)
+    dataset = load_split(run_dir / f"{split}.npz")
     cluster_explanations(
         run_dir / "explanations" / split,
         n_clusters=config.cluster.n_clusters,
         method=config.cluster.method,
         aggregate=config.cluster.aggregate,
         output_dir=run_dir / "clusters" / split,
+        dataset=dataset,
+        feature_mode=config.cluster.feature_mode,
+        value_weight=config.cluster.value_weight,
+        explanation_weight=config.cluster.explanation_weight,
+        mask_weight=config.cluster.mask_weight,
     )
 
 
-def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bool) -> None:
+def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bool, plot_mode: str = "value_with_importance_overlay") -> None:
     run_dir = Path(run_dir)
     binner = TimeSeriesBinner.load(run_dir / "binner.json")
+    dataset = load_split(run_dir / f"{split}.npz")
+    assignments_path = run_dir / "clusters" / split / "cluster_assignments.csv"
     cluster_dir = run_dir / "clusters" / split
+    value_dir = run_dir / "cluster_values" / split
     heatmap_dir = run_dir / "cluster_heatmaps" / split
-    paths = sorted(cluster_dir.glob("cluster_*.npy"))
-    matrices = [np.load(path) for path in paths]
+    matrices_by_cluster = aggregate_cluster_value_matrices(dataset, assignments_path, binner, output_dir=value_dir)
+    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if plot_mode == "value_with_importance_overlay" else {}
+    matrices = list(matrices_by_cluster.values())
     if matrices:
-        vmin = min(float(matrix.min()) for matrix in matrices)
-        vmax = max(float(matrix.max()) for matrix in matrices)
-        for path, matrix in zip(paths, matrices):
-            plot_explanation_heatmap(
+        vmin = min(float(np.nanmin(matrix)) for matrix in matrices)
+        vmax = max(float(np.nanmax(matrix)) for matrix in matrices)
+        for cluster, matrix in matrices_by_cluster.items():
+            plot_value_heatmap(
                 matrix,
                 binner.variable_vocab_,
                 binner.time_bins_,
-                heatmap_dir / f"{path.stem}.png",
-                title=path.stem,
+                heatmap_dir / f"cluster_{cluster}.png",
+                title=f"cluster_{cluster}",
                 vmin=vmin,
                 vmax=vmax,
+                importance_matrix=importance_by_cluster.get(cluster),
             )
     if render_instance_heatmaps:
-        explanation_dir = run_dir / "explanations" / split
         instance_dir = run_dir / "instance_heatmaps" / split
-        instance_paths = sorted(explanation_dir.glob("*.npy"))
-        instance_maps = [np.load(path) for path in instance_paths]
+        instance_maps = _denormalized_patient_value_maps(dataset, binner)
         if instance_maps:
-            vmin = min(float(matrix.min()) for matrix in instance_maps)
-            vmax = max(float(matrix.max()) for matrix in instance_maps)
-            for path, matrix in zip(instance_paths, instance_maps):
-                plot_explanation_heatmap(
+            vmin = min(float(np.nanmin(matrix)) for matrix in instance_maps.values())
+            vmax = max(float(np.nanmax(matrix)) for matrix in instance_maps.values())
+            for patient_id, matrix in instance_maps.items():
+                plot_value_heatmap(
                     matrix,
                     binner.variable_vocab_,
                     binner.time_bins_,
-                    instance_dir / f"{path.stem}.png",
-                    title=path.stem,
+                    instance_dir / f"{patient_id}.png",
+                    title=patient_id,
                     vmin=vmin,
                     vmax=vmax,
                 )
+
+
+def _cluster_importance_matrices(cluster_dir: Path) -> dict[int, np.ndarray]:
+    matrices: dict[int, np.ndarray] = {}
+    for path in sorted(cluster_dir.glob("cluster_*.npy")):
+        try:
+            cluster = int(path.stem.split("_", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        matrices[cluster] = np.load(path)
+    return matrices
+
+
+def _denormalized_patient_value_maps(dataset, binner: TimeSeriesBinner) -> dict[str, np.ndarray]:
+    if dataset.patient_ids is None:
+        return {}
+    x = dataset.x.detach().cpu().numpy()
+    values = x[:, 0].astype(np.float64)
+    mask = x[:, 1].astype(np.float64)
+    means = np.array([binner.means_.get(variable, 0.0) for variable in binner.variable_vocab_], dtype=np.float64)[:, None]
+    stds = np.array([binner.stds_.get(variable, 1.0) for variable in binner.variable_vocab_], dtype=np.float64)[:, None]
+    raw_values = values * stds[None, :, :] + means[None, :, :]
+    raw_values[mask == 0] = np.nan
+    return {patient_id: raw_values[idx] for idx, patient_id in enumerate(dataset.patient_ids)}
 
 
 def _stratify_or_none(labels: list[str]) -> list[str] | None:

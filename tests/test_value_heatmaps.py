@@ -1,0 +1,95 @@
+import numpy as np
+import pandas as pd
+
+from interpretable_ts_vit import TimeSeriesBinner
+from interpretable_ts_vit.clustering import cluster_explanations
+from interpretable_ts_vit.data import BinnedTimeSeriesDataset
+from interpretable_ts_vit.visualization import aggregate_cluster_value_matrices, plot_value_heatmap
+
+
+def test_cluster_value_aggregation_uses_observed_raw_values(tmp_path):
+    records = pd.DataFrame(
+        [
+            {"patient_id": "p1", "variable": "heart_rate", "value": 60.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p1", "variable": "heart_rate", "value": 80.0, "timestamp": "2026-01-01 01:00:00"},
+            {"patient_id": "p2", "variable": "heart_rate", "value": 100.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p2", "variable": "mean_bp", "value": 70.0, "timestamp": "2026-01-01 01:00:00"},
+        ]
+    )
+    labels = pd.DataFrame(
+        [
+            {"patient_id": "p1", "label": "false"},
+            {"patient_id": "p2", "label": "true"},
+        ]
+    )
+    binner = TimeSeriesBinner(granularity="1h", time_start="2026-01-01 00:00:00", time_end="2026-01-01 02:00:00")
+    binned = binner.fit_transform(records, labels)
+    dataset = BinnedTimeSeriesDataset(binned.x, binned.y, binned.patient_ids)
+    assignments = pd.DataFrame({"patient_id": ["p1", "p2"], "cluster": [0, 0]})
+
+    aggregates = aggregate_cluster_value_matrices(dataset, assignments, binner, output_dir=tmp_path / "values")
+    matrix = aggregates[0]
+    hr_index = binner.variable_vocab_.index("heart_rate")
+    bp_index = binner.variable_vocab_.index("mean_bp")
+
+    assert np.isclose(matrix[hr_index, 0], 80.0)
+    assert np.isclose(matrix[hr_index, 1], 80.0)
+    assert np.isnan(matrix[bp_index, 0])
+    assert np.isclose(matrix[bp_index, 1], 70.0)
+    assert (tmp_path / "values" / "cluster_0.npy").exists()
+
+    plot_value_heatmap(matrix, binner.variable_vocab_, binner.time_bins_, tmp_path / "cluster_0.png")
+    assert (tmp_path / "cluster_0.png").exists()
+
+
+def test_combined_clustering_and_value_importance_overlay(tmp_path):
+    records = pd.DataFrame(
+        [
+            {"patient_id": "p1", "variable": "heart_rate", "value": 60.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p1", "variable": "mean_bp", "value": 80.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p2", "variable": "heart_rate", "value": 100.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p2", "variable": "mean_bp", "value": 50.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p3", "variable": "heart_rate", "value": 62.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p3", "variable": "mean_bp", "value": 79.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p4", "variable": "heart_rate", "value": 98.0, "timestamp": "2026-01-01 00:00:00"},
+            {"patient_id": "p4", "variable": "mean_bp", "value": 51.0, "timestamp": "2026-01-01 00:00:00"},
+        ]
+    )
+    labels = pd.DataFrame(
+        [
+            {"patient_id": "p1", "label": "false"},
+            {"patient_id": "p2", "label": "true"},
+            {"patient_id": "p3", "label": "false"},
+            {"patient_id": "p4", "label": "true"},
+        ]
+    )
+    binner = TimeSeriesBinner(granularity="1h", time_start="2026-01-01 00:00:00", time_end="2026-01-01 01:00:00")
+    binned = binner.fit_transform(records, labels)
+    dataset = BinnedTimeSeriesDataset(binned.x, binned.y, binned.patient_ids)
+    explanations = {
+        "p1": np.array([[0.1], [0.9]]),
+        "p2": np.array([[0.9], [0.1]]),
+        "p3": np.array([[0.2], [0.8]]),
+        "p4": np.array([[0.8], [0.2]]),
+    }
+
+    clustered = cluster_explanations(
+        explanations,
+        n_clusters=2,
+        output_dir=tmp_path / "clusters",
+        dataset=dataset,
+        feature_mode="combined",
+    )
+    assert set(clustered["assignments"].columns) == {"patient_id", "cluster"}
+    assert (tmp_path / "clusters" / "cluster_metadata.json").exists()
+
+    value_matrices = aggregate_cluster_value_matrices(dataset, clustered["assignments"], binner)
+    for cluster, value_matrix in value_matrices.items():
+        plot_value_heatmap(
+            value_matrix,
+            binner.variable_vocab_,
+            binner.time_bins_,
+            tmp_path / f"overlay_{cluster}.png",
+            importance_matrix=clustered["aggregates"][cluster],
+        )
+    assert any(tmp_path.glob("overlay_*.png"))

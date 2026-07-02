@@ -4,7 +4,7 @@ import pandas as pd
 from interpretable_ts_vit import TimeSeriesBinner, ViTConfig, ViTTimeSeriesClassifier, cluster_explanations, explain_model
 from interpretable_ts_vit.data import BinnedTimeSeriesDataset
 from interpretable_ts_vit.training import train_model
-from interpretable_ts_vit.visualization import plot_explanation_heatmap
+from interpretable_ts_vit.visualization import aggregate_cluster_value_matrices, plot_value_heatmap
 
 
 def test_end_to_end_smoke(tmp_path):
@@ -27,8 +27,10 @@ def test_end_to_end_smoke(tmp_path):
     train_model(model, ds, ds, config=type("Cfg", (), {"device": "cpu", "batch_size": 5, "epochs": 1, "learning_rate": 1e-3, "weight_decay": 0.0})())
     explanations = explain_model(model, ds, output_dir=tmp_path / "explanations", device="cpu")
     clustered = cluster_explanations(explanations, n_clusters=2, output_dir=tmp_path / "clusters")
-    for cluster, matrix in clustered["aggregates"].items():
-        plot_explanation_heatmap(matrix, binner.variable_vocab_, binner.time_bins_, tmp_path / f"cluster_{cluster}.png")
+    value_matrices = aggregate_cluster_value_matrices(ds, clustered["assignments"], binner, output_dir=tmp_path / "cluster_values")
+    for cluster, matrix in value_matrices.items():
+        plot_value_heatmap(matrix, binner.variable_vocab_, binner.time_bins_, tmp_path / f"cluster_{cluster}.png")
     assert (tmp_path / "explanations" / "p0.npy").exists()
     assert (tmp_path / "clusters" / "cluster_assignments.csv").exists()
+    assert any((tmp_path / "cluster_values").glob("cluster_*.npy"))
     assert any(tmp_path.glob("cluster_*.png"))

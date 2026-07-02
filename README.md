@@ -1,6 +1,6 @@
 # Interpretable Time-Series ViT
 
-Research baseline for classifying irregularly sampled, multivariable time series and clustering class-specific explanation maps.
+Research baseline for classifying irregularly sampled, multivariable time series, clustering class-specific explanation maps, and visualizing the clinical value patterns associated with those clusters.
 
 ## Input Shape
 
@@ -33,6 +33,121 @@ tsvit plot --run runs/example
 ```
 
 The same functionality is available from Python through `interpretable_ts_vit`.
+
+## Value Heatmaps
+
+The default plotted heatmaps are **value heatmaps with an optional importance
+overlay**, not plain explanation-score heatmaps.
+
+Each PNG in:
+
+```text
+runs/<run_name>/cluster_heatmaps/<split>/
+```
+
+shows the mean observed clinical value for each variable/time bin among the
+patients assigned to that cluster. Rows are variables in the persisted training
+order, columns are global time bins, and color goes from lower values to higher
+values. In the default `value_with_importance_overlay` mode, black contours
+mark cells with high mean model importance inside that cluster.
+
+The pipeline still may generate explanation maps in:
+
+```text
+runs/<run_name>/explanations/<split>/
+```
+
+Those maps are used to group similar model-reasoning patterns during the
+`cluster` step and to draw the optional black importance contours. They are
+**not** what the default heatmap color represents.
+
+## Clustering Modes
+
+The clustering object is always the patient/test instance. What changes is the
+patient-level vector passed to KMeans.
+
+Configure this with `cluster.feature_mode`:
+
+```yaml
+cluster:
+  n_clusters: 8
+  feature_mode: combined
+  plot_mode: value_with_importance_overlay
+  value_weight: 1.0
+  explanation_weight: 1.0
+  mask_weight: 0.25
+```
+
+Supported `feature_mode` values:
+
+- `explanation`: cluster patients by flattened explanation matrices only.
+- `value`: cluster patients by flattened normalized value and mask channels.
+- `combined`: cluster patients by concatenating value, mask, and explanation
+  features.
+
+The default is `combined`, which means clusters reflect both:
+
+- similar clinical trajectories in the binned value/mask tensor
+- similar model-reasoning patterns in the explanation map
+
+Before KMeans, each feature block is standardized with `StandardScaler`.
+The block weights are then applied, so you can change the relative contribution
+of value, explanation, and mask blocks.
+
+Supported `plot_mode` values:
+
+- `value`: color only; color means mean observed clinical value.
+- `value_with_importance_overlay`: color means mean observed clinical value,
+  black contours mark high mean importance.
+
+This default answers:
+
+> Which groups of patients have similar clinical trajectories and similar model
+> reasoning patterns, and what do their actual measurements look like?
+
+### How Cluster Values Are Computed
+
+Prepared tensors have shape `[patients, 2, variables, timesteps]`:
+
+- channel 0, `D`: normalized values
+- channel 1, `M`: observed-value mask
+
+Missing cells are stored as `D=0, M=0`. Because zero is also a possible numeric
+value after normalization, missing cells must not be averaged directly. For a
+cluster, the heatmap matrix is computed as:
+
+```text
+raw_value = normalized_value * training_std(variable) + training_mean(variable)
+cluster_value(variable, time) =
+    sum(raw_value * mask) / sum(mask)
+```
+
+If `sum(mask) == 0` for a variable/time cell, no patient in that cluster has an
+observation there. The output matrix stores `NaN` for that cell and the plot
+renders it as gray.
+
+The numeric cluster matrices are saved separately in:
+
+```text
+runs/<run_name>/cluster_values/<split>/cluster_<id>.npy
+```
+
+The PNGs are saved in:
+
+```text
+runs/<run_name>/cluster_heatmaps/<split>/cluster_<id>.png
+```
+
+### Important Interpretation Note
+
+Rows can represent different clinical units, such as heart rate, blood
+pressure, respiratory rate, or oxygen saturation. A single color scale across
+all rows means the colorbar is literal numeric value, but the clinical meaning
+of "high" still depends on the row. For example, `100` means something
+different for heart rate than for oxygen saturation.
+
+Use these heatmaps to inspect temporal value patterns inside clusters, not as a
+unit-normalized severity scale across unrelated variables.
 
 ## MIMIC-IV Hypotension Dataset
 
@@ -149,7 +264,7 @@ The endpoint performs:
 - model loading and test-set evaluation
 - explanation map generation
 - explanation clustering
-- heatmap rendering
+- clinical value heatmap rendering for the clustered patients
 
 For programmatic use from another script or notebook, call:
 
@@ -219,8 +334,10 @@ metrics = train_model(model, dataset)
 
 `prepare-data` writes train/validation/test `.npz` files plus `binner.json`
 and `variable_vocab.json`. `train` writes `model.pt`, `metrics.json`, and
-`predictions.csv`. `explain`, `cluster`, and `plot` add per-patient
-explanation maps, cluster assignments, cluster averages, and PNG heatmaps.
+`predictions.csv`. `explain` writes per-patient explanation maps. `cluster`
+writes cluster assignments and explanation-space cluster averages. `plot`
+writes `cluster_values/*.npy` and PNG value heatmaps whose colors represent
+mean observed clinical values, not explanation scores.
 
 ## Notes
 

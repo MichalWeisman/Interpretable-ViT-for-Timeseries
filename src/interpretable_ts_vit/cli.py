@@ -20,7 +20,7 @@ from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
 from .training import predict_model, train_model
-from .visualization import plot_explanation_heatmap
+from .visualization import aggregate_cluster_value_matrices, plot_value_heatmap
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -65,11 +65,18 @@ def main(argv: list[str] | None = None) -> None:
     cluster.add_argument("--run", required=True)
     cluster.add_argument("--split", default="test")
     cluster.add_argument("--n-clusters", type=int)
+    cluster.add_argument("--config")
+    cluster.add_argument("--feature-mode", choices=["explanation", "value", "combined"])
+    cluster.add_argument("--value-weight", type=float)
+    cluster.add_argument("--explanation-weight", type=float)
+    cluster.add_argument("--mask-weight", type=float)
 
     plot = sub.add_parser("plot")
     plot.add_argument("--run", required=True)
     plot.add_argument("--split", default="test")
     plot.add_argument("--instances", action="store_true")
+    plot.add_argument("--config")
+    plot.add_argument("--plot-mode", choices=["value", "value_with_importance_overlay"])
 
     args = parser.parse_args(argv)
     if args.command == "prepare-data":
@@ -188,52 +195,95 @@ def cmd_explain(args) -> None:
 
 
 def cmd_cluster(args) -> None:
-    """Cluster saved explanation maps and save cluster-level averages."""
+    """Cluster patients using explanation, value, or combined feature vectors."""
     run = Path(args.run)
-    n_clusters = args.n_clusters or load_config(None).cluster.n_clusters
+    config = load_config(args.config).cluster
+    n_clusters = args.n_clusters or config.n_clusters
+    dataset = load_split(run / f"{args.split}.npz")
     explanation_dir = run / "explanations" / args.split
     out = run / "clusters" / args.split
-    cluster_explanations(explanation_dir, n_clusters=n_clusters, output_dir=out)
+    cluster_explanations(
+        explanation_dir,
+        n_clusters=n_clusters,
+        method=config.method,
+        aggregate=config.aggregate,
+        output_dir=out,
+        dataset=dataset,
+        feature_mode=args.feature_mode or config.feature_mode,
+        value_weight=args.value_weight if args.value_weight is not None else config.value_weight,
+        explanation_weight=args.explanation_weight if args.explanation_weight is not None else config.explanation_weight,
+        mask_weight=args.mask_weight if args.mask_weight is not None else config.mask_weight,
+    )
 
 
 def cmd_plot(args) -> None:
-    """Render cluster-level heatmaps and optionally per-instance heatmaps."""
+    """Render cluster-level value heatmaps and optionally per-patient value heatmaps."""
     run = Path(args.run)
+    config = load_config(args.config).cluster
+    plot_mode = args.plot_mode or config.plot_mode
     binner = TimeSeriesBinner.load(run / "binner.json")
+    dataset = load_split(run / f"{args.split}.npz")
+    assignments_path = run / "clusters" / args.split / "cluster_assignments.csv"
     cluster_dir = run / "clusters" / args.split
+    value_dir = run / "cluster_values" / args.split
     heatmap_dir = run / "cluster_heatmaps" / args.split
-    matrices = [np.load(path) for path in sorted(cluster_dir.glob("cluster_*.npy"))]
+    matrices_by_cluster = aggregate_cluster_value_matrices(dataset, assignments_path, binner, output_dir=value_dir)
+    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if plot_mode == "value_with_importance_overlay" else {}
+    matrices = list(matrices_by_cluster.values())
     if matrices:
-        vmin = min(float(matrix.min()) for matrix in matrices)
-        vmax = max(float(matrix.max()) for matrix in matrices)
-        for path, matrix in zip(sorted(cluster_dir.glob("cluster_*.npy")), matrices):
-            plot_explanation_heatmap(
+        vmin = min(float(np.nanmin(matrix)) for matrix in matrices)
+        vmax = max(float(np.nanmax(matrix)) for matrix in matrices)
+        for cluster, matrix in matrices_by_cluster.items():
+            plot_value_heatmap(
                 matrix,
                 binner.variable_vocab_,
                 binner.time_bins_,
-                heatmap_dir / f"{path.stem}.png",
-                title=path.stem,
+                heatmap_dir / f"cluster_{cluster}.png",
+                title=f"cluster_{cluster}",
                 vmin=vmin,
                 vmax=vmax,
+                importance_matrix=importance_by_cluster.get(cluster),
             )
     if args.instances:
-        explanation_dir = run / "explanations" / args.split
         instance_dir = run / "instance_heatmaps" / args.split
-        paths = sorted(explanation_dir.glob("*.npy"))
-        if paths:
-            maps = [np.load(path) for path in paths]
-            vmin = min(float(matrix.min()) for matrix in maps)
-            vmax = max(float(matrix.max()) for matrix in maps)
-            for path, matrix in zip(paths, maps):
-                plot_explanation_heatmap(
+        maps = _denormalized_patient_value_maps(dataset, binner)
+        if maps:
+            vmin = min(float(np.nanmin(matrix)) for matrix in maps.values())
+            vmax = max(float(np.nanmax(matrix)) for matrix in maps.values())
+            for patient_id, matrix in maps.items():
+                plot_value_heatmap(
                     matrix,
                     binner.variable_vocab_,
                     binner.time_bins_,
-                    instance_dir / f"{path.stem}.png",
-                    title=path.stem,
+                    instance_dir / f"{patient_id}.png",
+                    title=patient_id,
                     vmin=vmin,
                     vmax=vmax,
                 )
+
+
+def _denormalized_patient_value_maps(dataset: BinnedTimeSeriesDataset, binner: TimeSeriesBinner) -> dict[str, np.ndarray]:
+    if dataset.patient_ids is None:
+        return {}
+    x = dataset.x.detach().cpu().numpy()
+    values = x[:, 0].astype(np.float64)
+    mask = x[:, 1].astype(np.float64)
+    means = np.array([binner.means_.get(variable, 0.0) for variable in binner.variable_vocab_], dtype=np.float64)[:, None]
+    stds = np.array([binner.stds_.get(variable, 1.0) for variable in binner.variable_vocab_], dtype=np.float64)[:, None]
+    raw_values = values * stds[None, :, :] + means[None, :, :]
+    raw_values[mask == 0] = np.nan
+    return {patient_id: raw_values[idx] for idx, patient_id in enumerate(dataset.patient_ids)}
+
+
+def _cluster_importance_matrices(cluster_dir: Path) -> dict[int, np.ndarray]:
+    matrices: dict[int, np.ndarray] = {}
+    for path in sorted(cluster_dir.glob("cluster_*.npy")):
+        try:
+            cluster = int(path.stem.split("_", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        matrices[cluster] = np.load(path)
+    return matrices
 
 
 if __name__ == "__main__":

@@ -59,11 +59,16 @@ class ExplainConfig:
 
 @dataclass
 class ClusterConfig:
-    """Explanation clustering options."""
+    """Patient clustering and heatmap visualization options."""
 
     n_clusters: int = 8
     method: str = "kmeans"
     aggregate: str = "mean"
+    feature_mode: str = "combined"
+    plot_mode: str = "value_with_importance_overlay"
+    value_weight: float = 1.0
+    explanation_weight: float = 1.0
+    mask_weight: float = 0.25
 
 
 @dataclass
