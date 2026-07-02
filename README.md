@@ -38,21 +38,35 @@ The same functionality is available from Python through `interpretable_ts_vit`.
 
 The default plotted heatmaps use one interpretation path:
 
-1. Cluster patients by their model-importance maps.
-2. For each cluster, plot the patients' mean observed clinical values.
-3. Use opacity or border width to show where the model was most important.
+1. Split patients by the model's predicted class.
+2. Within each predicted class, cluster patients by their model-importance maps.
+3. For each class-specific cluster, plot the patients' mean observed clinical values.
+4. Use opacity or border width to show where the model was most important.
 
-Each PNG in:
+The resulting patterns are organized by predicted class:
 
 ```text
-runs/<run_name>/cluster_heatmaps/<split>/
+Class True:
+  cluster_0
+  cluster_1
+  ...
+Class False:
+  cluster_0
+  cluster_1
+  ...
+```
+
+Each PNG under:
+
+```text
+runs/<run_name>/cluster_heatmaps/<split>/<predicted_class>/
 ```
 
 shows the mean observed clinical value for each variable/time bin among the
-patients assigned to that importance-derived cluster. Rows are variables in the
-persisted training order. Columns are relative time bins; the x-axis label
-shows the inferred bin granularity, such as `30min bins`, and each tick is
-elapsed time from the first bin.
+patients assigned to that predicted class and importance-derived cluster. Rows
+are variables in the persisted training order. Columns are relative time bins;
+the x-axis label shows the inferred bin granularity, such as `30min bins`, and
+each tick is elapsed time from the first bin.
 
 Visual encoding:
 
@@ -76,8 +90,11 @@ runs/<run_name>/explanations/<split>/
 ```
 
 Those maps are used to group similar model-reasoning patterns during the
-`cluster` step and to control opacity or border width in the heatmap. They are
-**not** what the heatmap color represents.
+`cluster` step and to control opacity or border width in the heatmap. When a
+predictions CSV is available, clustering is done separately for each
+`predicted_label`, so `cluster_0` under `True` is unrelated to `cluster_0`
+under `False`. The explanation maps are **not** what the heatmap color
+represents.
 
 Configure the default behavior with:
 
@@ -107,8 +124,9 @@ tsvit plot --run runs/example --importance-threshold 0.8
 
 This default answers:
 
-> Which patients caused the model to focus on similar variable/time regions,
-> and what were their actual measurements in those regions?
+> Among patients predicted as the same class, which patients caused the model
+> to focus on similar variable/time regions, and what were their actual
+> measurements in those regions?
 
 ### How Cluster Values Are Computed
 
@@ -134,13 +152,13 @@ renders it as gray.
 The numeric cluster matrices are saved separately in:
 
 ```text
-runs/<run_name>/cluster_values/<split>/cluster_<id>.npy
+runs/<run_name>/cluster_values/<split>/<predicted_class>/cluster_<id>.npy
 ```
 
 The PNGs are saved in:
 
 ```text
-runs/<run_name>/cluster_heatmaps/<split>/cluster_<id>.png
+runs/<run_name>/cluster_heatmaps/<split>/<predicted_class>/cluster_<id>.png
 ```
 
 ### Important Interpretation Note

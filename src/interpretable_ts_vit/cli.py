@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -204,6 +205,7 @@ def cmd_cluster(args) -> None:
     out = run / "clusters" / args.split
     cluster_explanations(
         explanation_dir,
+        predictions=_find_predictions_path(run, args.split),
         n_clusters=n_clusters,
         method=config.method,
         aggregate=config.aggregate,
@@ -230,16 +232,16 @@ def cmd_plot(args) -> None:
     if matrices:
         vmin = min(float(np.nanmin(matrix)) for matrix in matrices)
         vmax = max(float(np.nanmax(matrix)) for matrix in matrices)
-        for cluster, matrix in matrices_by_cluster.items():
+        for cluster_key, matrix in matrices_by_cluster.items():
             plot_value_heatmap(
                 matrix,
                 binner.variable_vocab_,
                 binner.time_bins_,
-                heatmap_dir / f"cluster_{cluster}.png",
-                title=f"cluster_{cluster}",
+                _cluster_heatmap_path(heatmap_dir, cluster_key),
+                title=_cluster_title(cluster_key),
                 vmin=vmin,
                 vmax=vmax,
-                importance_matrix=importance_by_cluster.get(cluster),
+                importance_matrix=_importance_for_key(importance_by_cluster, cluster_key),
                 importance_style=importance_style or "opacity",
                 importance_threshold=importance_threshold,
             )
@@ -274,15 +276,61 @@ def _denormalized_patient_value_maps(dataset: BinnedTimeSeriesDataset, binner: T
     return {patient_id: raw_values[idx] for idx, patient_id in enumerate(dataset.patient_ids)}
 
 
-def _cluster_importance_matrices(cluster_dir: Path) -> dict[int, np.ndarray]:
-    matrices: dict[int, np.ndarray] = {}
+def _cluster_importance_matrices(cluster_dir: Path) -> dict[int | tuple[str, int], np.ndarray]:
+    matrices: dict[int | tuple[str, int], np.ndarray] = {}
     for path in sorted(cluster_dir.glob("cluster_*.npy")):
         try:
             cluster = int(path.stem.split("_", 1)[1])
         except (IndexError, ValueError):
             continue
         matrices[cluster] = np.load(path)
+    for class_dir in sorted(path for path in cluster_dir.iterdir() if path.is_dir()):
+        for path in sorted(class_dir.glob("cluster_*.npy")):
+            try:
+                cluster = int(path.stem.split("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            matrices[(class_dir.name, cluster)] = np.load(path)
     return matrices
+
+
+def _find_predictions_path(run_dir: Path, split: str) -> Path | None:
+    split_predictions = run_dir / f"{split}_predictions.csv"
+    if split_predictions.exists():
+        return split_predictions
+    legacy_predictions = run_dir / "predictions.csv"
+    if legacy_predictions.exists():
+        return legacy_predictions
+    return None
+
+
+def _cluster_heatmap_path(output_dir: Path, key: int | tuple[str, int]) -> Path:
+    if isinstance(key, tuple):
+        predicted_label, cluster = key
+        return output_dir / _safe_path_component(predicted_label) / f"cluster_{cluster}.png"
+    return output_dir / f"cluster_{key}.png"
+
+
+def _cluster_title(key: int | tuple[str, int]) -> str:
+    if isinstance(key, tuple):
+        predicted_label, cluster = key
+        return f"Class {predicted_label}: cluster_{cluster}"
+    return f"cluster_{key}"
+
+
+def _importance_for_key(
+    importance_by_cluster: dict[int | tuple[str, int], np.ndarray],
+    key: int | tuple[str, int],
+) -> np.ndarray | None:
+    matrix = importance_by_cluster.get(key)
+    if matrix is not None or not isinstance(key, tuple):
+        return matrix
+    predicted_label, cluster = key
+    return importance_by_cluster.get((_safe_path_component(predicted_label), cluster))
+
+
+def _safe_path_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_") or "class"
 
 
 def _importance_style(plot_mode: str) -> str | None:

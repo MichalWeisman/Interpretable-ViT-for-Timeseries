@@ -76,33 +76,41 @@ def test_importance_clustering_and_value_importance_opacity(tmp_path):
 
     clustered = cluster_explanations(
         explanations,
+        predictions={"p1": "false", "p2": "true", "p3": "false", "p4": "true"},
         n_clusters=2,
         output_dir=tmp_path / "clusters",
     )
-    assert set(clustered["assignments"].columns) == {"patient_id", "cluster"}
+    assert set(clustered["assignments"].columns) == {"patient_id", "predicted_label", "cluster"}
     assert (tmp_path / "clusters" / "cluster_metadata.json").exists()
+    assert (tmp_path / "clusters" / "false" / "cluster_0.npy").exists()
+    assert (tmp_path / "clusters" / "true" / "cluster_0.npy").exists()
 
-    value_matrices = aggregate_cluster_value_matrices(dataset, clustered["assignments"], binner)
-    for cluster, value_matrix in value_matrices.items():
+    value_matrices = aggregate_cluster_value_matrices(dataset, clustered["assignments"], binner, output_dir=tmp_path / "values")
+    assert all(isinstance(key, tuple) for key in value_matrices)
+    assert (tmp_path / "values" / "false" / "cluster_0.npy").exists()
+    assert (tmp_path / "values" / "true" / "cluster_0.npy").exists()
+    for (predicted_label, cluster), value_matrix in value_matrices.items():
+        class_dir = tmp_path / predicted_label
+        class_dir.mkdir(exist_ok=True)
         plot_value_heatmap(
             value_matrix,
             binner.variable_vocab_,
             binner.time_bins_,
-            tmp_path / f"overlay_{cluster}.png",
-            importance_matrix=clustered["aggregates"][cluster],
+            class_dir / f"overlay_{cluster}.png",
+            importance_matrix=clustered["aggregates"][predicted_label][cluster],
             importance_threshold=0.8,
         )
         plot_value_heatmap(
             value_matrix,
             binner.variable_vocab_,
             binner.time_bins_,
-            tmp_path / f"border_{cluster}.png",
-            importance_matrix=clustered["aggregates"][cluster],
+            class_dir / f"border_{cluster}.png",
+            importance_matrix=clustered["aggregates"][predicted_label][cluster],
             importance_style="border",
             importance_threshold=0.8,
         )
-    assert any(tmp_path.glob("overlay_*.png"))
-    assert any(tmp_path.glob("border_*.png"))
+    assert any(tmp_path.rglob("overlay_*.png"))
+    assert any(tmp_path.rglob("border_*.png"))
 
 
 def test_importance_threshold_must_be_quantile(tmp_path):

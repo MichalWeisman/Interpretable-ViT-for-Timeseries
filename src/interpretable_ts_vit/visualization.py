@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Sequence
+import re
 
 import matplotlib
 
@@ -55,7 +56,7 @@ def aggregate_cluster_value_matrices(
     assignments: pd.DataFrame | str | Path,
     binner: TimeSeriesBinner,
     output_dir: str | Path | None = None,
-) -> dict[int, np.ndarray]:
+) -> dict[int | tuple[str, int], np.ndarray]:
     """Aggregate observed clinical values for each cluster.
 
     The prepared tensor stores normalized values in channel 0 and an observed
@@ -81,8 +82,9 @@ def aggregate_cluster_value_matrices(
     raw_values = values * stds[None, :, :] + means[None, :, :]
 
     patient_to_index = {str(patient_id): idx for idx, patient_id in enumerate(dataset.patient_ids)}
-    aggregates: dict[int, np.ndarray] = {}
-    for cluster, group in assignment_frame.groupby("cluster", sort=True):
+    group_columns = ["predicted_label", "cluster"] if "predicted_label" in assignment_frame.columns else ["cluster"]
+    aggregates: dict[int | tuple[str, int], np.ndarray] = {}
+    for group_key, group in assignment_frame.groupby(group_columns, sort=True):
         indices = [patient_to_index[str(patient_id)] for patient_id in group["patient_id"] if str(patient_id) in patient_to_index]
         if not indices:
             continue
@@ -92,13 +94,16 @@ def aggregate_cluster_value_matrices(
         denominator = np.sum(cluster_mask, axis=0)
         matrix = np.full_like(numerator, np.nan, dtype=np.float64)
         np.divide(numerator, denominator, out=matrix, where=denominator > 0)
-        aggregates[int(cluster)] = matrix
+        key = _aggregate_key(group_key, group_columns)
+        aggregates[key] = matrix
 
     if output_dir is not None:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
-        for cluster, matrix in aggregates.items():
-            np.save(out / f"cluster_{cluster}.npy", matrix)
+        for key, matrix in aggregates.items():
+            path = _cluster_matrix_path(out, key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(path, matrix)
     return aggregates
 
 
@@ -299,4 +304,26 @@ def _read_assignments(assignments: pd.DataFrame | str | Path) -> pd.DataFrame:
         raise ValueError(f"Cluster assignments are missing columns: {sorted(missing)}")
     frame["patient_id"] = frame["patient_id"].astype(str)
     frame["cluster"] = frame["cluster"].astype(int)
+    if "predicted_label" in frame.columns:
+        frame["predicted_label"] = frame["predicted_label"].astype(str)
     return frame
+
+
+def _aggregate_key(group_key, group_columns: list[str]) -> int | tuple[str, int]:
+    if group_columns == ["cluster"]:
+        if isinstance(group_key, tuple):
+            group_key = group_key[0]
+        return int(group_key)
+    predicted_label, cluster = group_key
+    return str(predicted_label), int(cluster)
+
+
+def _cluster_matrix_path(output_dir: Path, key: int | tuple[str, int]) -> Path:
+    if isinstance(key, tuple):
+        predicted_label, cluster = key
+        return output_dir / _safe_path_component(predicted_label) / f"cluster_{cluster}.npy"
+    return output_dir / f"cluster_{key}.npy"
+
+
+def _safe_path_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_") or "class"

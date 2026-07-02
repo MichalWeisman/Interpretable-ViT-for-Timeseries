@@ -49,5 +49,7 @@ def test_run_pipeline_without_cli_on_generic_records(tmp_path):
     assert (tmp_path / "run" / "test_evaluation_metrics.json").exists()
     assert (tmp_path / "run" / "explanations" / "test").exists()
     assert (tmp_path / "run" / "clusters" / "test" / "cluster_assignments.csv").exists()
-    assert any((tmp_path / "run" / "cluster_heatmaps" / "test").glob("*.png"))
+    assignments = pd.read_csv(tmp_path / "run" / "clusters" / "test" / "cluster_assignments.csv")
+    assert "predicted_label" in assignments.columns
+    assert any((tmp_path / "run" / "cluster_heatmaps" / "test").rglob("*.png"))
     assert "evaluation_metrics" in result.artifacts
