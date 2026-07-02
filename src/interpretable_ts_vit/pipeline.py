@@ -235,7 +235,8 @@ def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bo
     value_dir = run_dir / "cluster_values" / split
     heatmap_dir = run_dir / "cluster_heatmaps" / split
     matrices_by_cluster = aggregate_cluster_value_matrices(dataset, assignments_path, binner, output_dir=value_dir)
-    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if plot_mode == "value_with_importance_opacity" else {}
+    importance_style = _importance_style(plot_mode)
+    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if importance_style is not None else {}
     matrices = list(matrices_by_cluster.values())
     if matrices:
         vmin = min(float(np.nanmin(matrix)) for matrix in matrices)
@@ -250,6 +251,7 @@ def _plot_and_save(run_dir: str | Path, split: str, render_instance_heatmaps: bo
                 vmin=vmin,
                 vmax=vmax,
                 importance_matrix=importance_by_cluster.get(cluster),
+                importance_style=importance_style or "opacity",
             )
     if render_instance_heatmaps:
         instance_dir = run_dir / "instance_heatmaps" / split
@@ -278,6 +280,16 @@ def _cluster_importance_matrices(cluster_dir: Path) -> dict[int, np.ndarray]:
             continue
         matrices[cluster] = np.load(path)
     return matrices
+
+
+def _importance_style(plot_mode: str) -> str | None:
+    if plot_mode == "value_with_importance_opacity":
+        return "opacity"
+    if plot_mode == "value_with_importance_border":
+        return "border"
+    if plot_mode == "value":
+        return None
+    raise ValueError("plot_mode must be 'value', 'value_with_importance_opacity', or 'value_with_importance_border'.")
 
 
 def _denormalized_patient_value_maps(dataset, binner: TimeSeriesBinner) -> dict[str, np.ndarray]:

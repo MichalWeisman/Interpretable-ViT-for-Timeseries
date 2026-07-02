@@ -90,4 +90,13 @@ def test_importance_clustering_and_value_importance_opacity(tmp_path):
             tmp_path / f"overlay_{cluster}.png",
             importance_matrix=clustered["aggregates"][cluster],
         )
+        plot_value_heatmap(
+            value_matrix,
+            binner.variable_vocab_,
+            binner.time_bins_,
+            tmp_path / f"border_{cluster}.png",
+            importance_matrix=clustered["aggregates"][cluster],
+            importance_style="border",
+        )
     assert any(tmp_path.glob("overlay_*.png"))
+    assert any(tmp_path.glob("border_*.png"))

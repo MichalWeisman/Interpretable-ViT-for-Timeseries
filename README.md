@@ -40,7 +40,7 @@ The default plotted heatmaps use one interpretation path:
 
 1. Cluster patients by their model-importance maps.
 2. For each cluster, plot the patients' mean observed clinical values.
-3. Use opacity to show where the model was most important.
+3. Use opacity or border width to show where the model was most important.
 
 Each PNG in:
 
@@ -50,19 +50,23 @@ runs/<run_name>/cluster_heatmaps/<split>/
 
 shows the mean observed clinical value for each variable/time bin among the
 patients assigned to that importance-derived cluster. Rows are variables in the
-persisted training order and columns are global time bins.
+persisted training order. Columns are relative time bins; the x-axis label
+shows the inferred bin granularity, such as `30min bins`, and each tick is
+elapsed time from the first bin.
 
 Visual encoding:
 
 - color = mean observed clinical value
 - blue = lower value
 - red = higher value
-- opacity = mean model importance
+- opacity or border width = mean model importance
 - gray = no observations for that variable/time cell
 
-The colorbar intentionally has no numeric ticks. Different rows can represent
-different clinical units, so the colorbar should be read as low-to-high within
-the plotted value scale, not as a single shared clinical unit.
+The colorbar is labeled `Mean Observed Value`. It intentionally has no numeric
+ticks: the bottom is labeled `Low` and the top is labeled `High`. Different
+rows can represent different clinical units, so the colorbar should be read as
+low-to-high within the plotted value scale, not as a single shared clinical
+unit.
 
 The pipeline still may generate explanation maps in:
 
@@ -71,8 +75,8 @@ runs/<run_name>/explanations/<split>/
 ```
 
 Those maps are used to group similar model-reasoning patterns during the
-`cluster` step and to control opacity in the heatmap. They are **not** what the
-heatmap color represents.
+`cluster` step and to control opacity or border width in the heatmap. They are
+**not** what the heatmap color represents.
 
 Configure the default behavior with:
 
@@ -81,6 +85,9 @@ cluster:
   n_clusters: 8
   plot_mode: value_with_importance_opacity
 ```
+
+Set `plot_mode: value_with_importance_border` if you prefer border width,
+instead of opacity, to encode importance.
 
 This default answers:
 

@@ -9,6 +9,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
 
@@ -110,42 +111,51 @@ def plot_value_heatmap(
     vmin: float | None = None,
     vmax: float | None = None,
     importance_matrix: np.ndarray | None = None,
+    importance_style: str = "opacity",
     min_importance_alpha: float = 0.15,
 ) -> None:
     """Save a variable-by-time heatmap of mean observed clinical values.
 
     Color represents clinical value using a blue-low to red-high scale. If
-    `importance_matrix` is provided, cell opacity represents model importance:
-    less-important cells are more transparent and highly important cells are
-    more opaque. The colorbar intentionally has no numeric ticks because the
-    variables can have different clinical units.
+    `importance_matrix` is provided, `importance_style` controls the visual
+    encoding: `"opacity"` makes important cells more opaque, while `"border"`
+    uses thicker cell borders for more important cells. The colorbar
+    intentionally has no numeric ticks because variables can have different
+    clinical units.
     """
+    if importance_style not in {"opacity", "border"}:
+        raise ValueError("importance_style must be either 'opacity' or 'border'.")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig_width = max(8, min(24, len(time_bins) * 0.28))
     fig_height = max(4, min(18, len(variables) * 0.32))
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     cmap = plt.get_cmap("coolwarm").with_extremes(bad="#d9d9d9")
-    alpha = _importance_alpha(np.asarray(importance_matrix), matrix, min_importance_alpha) if importance_matrix is not None else None
+    importance = np.asarray(importance_matrix) if importance_matrix is not None else None
+    alpha = _importance_alpha(importance, matrix, min_importance_alpha) if importance is not None and importance_style == "opacity" else None
     image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax, alpha=alpha)
+    if importance is not None and importance_style == "border":
+        _draw_importance_borders(ax, importance, matrix)
     ax.set_yticks(np.arange(len(variables)))
     ax.set_yticklabels(variables)
-    tick_count = min(10, len(time_bins))
-    if tick_count:
-        positions = np.linspace(0, len(time_bins) - 1, tick_count, dtype=int)
+    positions, labels, granularity = _relative_time_ticks(time_bins)
+    if len(positions):
         ax.set_xticks(positions)
-        ax.set_xticklabels([str(time_bins[i]) for i in positions], rotation=45, ha="right")
-    ax.set_xlabel("Time bin")
+        ax.set_xticklabels(labels, rotation=0, ha="center")
+    ax.set_xlabel(f"Relative time ({granularity} bins)" if granularity else "Relative time")
     ax.set_ylabel("Variable")
     if title:
         ax.set_title(title)
-    colorbar = fig.colorbar(image, ax=ax, label="Mean observed value: blue low, red high")
+    colorbar = fig.colorbar(image, ax=ax, label="Mean Observed Value")
     colorbar.set_ticks([])
+    colorbar.ax.text(0.5, -0.02, "Low", transform=colorbar.ax.transAxes, ha="center", va="top")
+    colorbar.ax.text(0.5, 1.02, "High", transform=colorbar.ax.transAxes, ha="center", va="bottom")
     if importance_matrix is not None:
+        label = "opacity: model importance" if importance_style == "opacity" else "border width: model importance"
         ax.text(
             0.99,
             1.01,
-            "opacity: model importance",
+            label,
             transform=ax.transAxes,
             ha="right",
             va="bottom",
@@ -155,6 +165,31 @@ def plot_value_heatmap(
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
+
+
+def _relative_time_ticks(time_bins: Sequence[str]) -> tuple[np.ndarray, list[str], str | None]:
+    if len(time_bins) == 0:
+        return np.array([], dtype=int), [], None
+    tick_count = min(10, len(time_bins))
+    positions = np.unique(np.linspace(0, len(time_bins) - 1, tick_count, dtype=int))
+    parsed = pd.to_datetime(list(time_bins), errors="coerce")
+    if len(parsed) < 2 or pd.isna(parsed[0]) or pd.isna(parsed[1]):
+        return positions, [str(int(position)) for position in positions], None
+    step = parsed[1] - parsed[0]
+    granularity = _format_timedelta(step)
+    labels = [_format_timedelta(parsed[int(position)] - parsed[0]) for position in positions]
+    return positions, labels, granularity
+
+
+def _format_timedelta(delta) -> str:
+    total_seconds = int(pd.Timedelta(delta).total_seconds())
+    if total_seconds == 0:
+        return "0"
+    if total_seconds % 3600 == 0:
+        return f"{total_seconds // 3600}h"
+    if total_seconds % 60 == 0:
+        return f"{total_seconds // 60}min"
+    return f"{total_seconds}s"
 
 
 def _importance_alpha(importance_matrix: np.ndarray, value_matrix: np.ndarray, min_alpha: float) -> np.ndarray:
@@ -172,6 +207,34 @@ def _importance_alpha(importance_matrix: np.ndarray, value_matrix: np.ndarray, m
     alpha = min_alpha + (1.0 - min_alpha) * np.clip(scaled, 0.0, 1.0)
     alpha[~np.isfinite(value_matrix)] = 1.0
     return alpha
+
+
+def _draw_importance_borders(ax, importance_matrix: np.ndarray, value_matrix: np.ndarray) -> None:
+    if importance_matrix.shape != value_matrix.shape:
+        return
+    finite = importance_matrix[np.isfinite(importance_matrix)]
+    if finite.size == 0:
+        return
+    low = float(np.nanmin(finite))
+    high = float(np.nanmax(finite))
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        return
+    scaled = np.clip((importance_matrix - low) / (high - low), 0.0, 1.0)
+    for row in range(value_matrix.shape[0]):
+        for col in range(value_matrix.shape[1]):
+            if not np.isfinite(value_matrix[row, col]) or not np.isfinite(scaled[row, col]):
+                continue
+            linewidth = 0.05 + 1.8 * float(scaled[row, col])
+            ax.add_patch(
+                Rectangle(
+                    (col - 0.5, row - 0.5),
+                    1,
+                    1,
+                    fill=False,
+                    edgecolor="black",
+                    linewidth=linewidth,
+                )
+            )
 
 
 def _read_assignments(assignments: pd.DataFrame | str | Path) -> pd.DataFrame:

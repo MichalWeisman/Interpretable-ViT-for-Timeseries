@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> None:
     plot.add_argument("--split", default="test")
     plot.add_argument("--instances", action="store_true")
     plot.add_argument("--config")
-    plot.add_argument("--plot-mode", choices=["value", "value_with_importance_opacity"])
+    plot.add_argument("--plot-mode", choices=["value", "value_with_importance_opacity", "value_with_importance_border"])
 
     args = parser.parse_args(argv)
     if args.command == "prepare-data":
@@ -218,7 +218,8 @@ def cmd_plot(args) -> None:
     value_dir = run / "cluster_values" / args.split
     heatmap_dir = run / "cluster_heatmaps" / args.split
     matrices_by_cluster = aggregate_cluster_value_matrices(dataset, assignments_path, binner, output_dir=value_dir)
-    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if plot_mode == "value_with_importance_opacity" else {}
+    importance_style = _importance_style(plot_mode)
+    importance_by_cluster = _cluster_importance_matrices(cluster_dir) if importance_style is not None else {}
     matrices = list(matrices_by_cluster.values())
     if matrices:
         vmin = min(float(np.nanmin(matrix)) for matrix in matrices)
@@ -233,6 +234,7 @@ def cmd_plot(args) -> None:
                 vmin=vmin,
                 vmax=vmax,
                 importance_matrix=importance_by_cluster.get(cluster),
+                importance_style=importance_style or "opacity",
             )
     if args.instances:
         instance_dir = run / "instance_heatmaps" / args.split
@@ -274,6 +276,16 @@ def _cluster_importance_matrices(cluster_dir: Path) -> dict[int, np.ndarray]:
             continue
         matrices[cluster] = np.load(path)
     return matrices
+
+
+def _importance_style(plot_mode: str) -> str | None:
+    if plot_mode == "value_with_importance_opacity":
+        return "opacity"
+    if plot_mode == "value_with_importance_border":
+        return "border"
+    if plot_mode == "value":
+        return None
+    raise ValueError("plot_mode must be 'value', 'value_with_importance_opacity', or 'value_with_importance_border'.")
 
 
 if __name__ == "__main__":
