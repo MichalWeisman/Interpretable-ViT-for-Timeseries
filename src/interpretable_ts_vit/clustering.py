@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 import re
 
 import numpy as np
@@ -12,14 +12,25 @@ import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
+try:
+    from hdbscan import HDBSCAN
+except ImportError:  # pragma: no cover - optional dependency
+    HDBSCAN = None
+
 
 def cluster_explanations(
     explanations: Mapping[str, np.ndarray] | str | Path,
     predictions: pd.DataFrame | Mapping[str, str] | str | Path | None = None,
+    values: Mapping[str, np.ndarray] | str | Path | None = None,
     n_clusters: int = 8,
     method: str = "kmeans",
+    feature_mode: str = "explanation",
+    explanation_weight: float = 1.0,
+    value_weight: float = 1.0,
     aggregate: str = "mean",
     output_dir: str | Path | None = None,
+    hdbscan_min_cluster_size: int | None = None,
+    hdbscan_min_samples: int | None = None,
 ) -> dict[str, object]:
     """Cluster flattened explanation maps and return assignments/averages.
 
@@ -28,26 +39,108 @@ def cluster_explanations(
     is provided, explanations are clustered separately inside each predicted
     class, so cluster ids represent class-specific patterns.
     """
-    if method != "kmeans":
-        raise ValueError("Only kmeans clustering is currently supported.")
+    if method not in {"kmeans", "hdbscan"}:
+        raise ValueError("Only kmeans and hdbscan clustering are currently supported.")
+    if feature_mode not in {"explanation", "value", "combined"}:
+        raise ValueError("feature_mode must be 'explanation', 'value', or 'combined'. Use cluster_embeddings for ViT embeddings.")
+    if explanation_weight <= 0 or value_weight <= 0:
+        raise ValueError("explanation_weight and value_weight must be positive.")
     if aggregate != "mean":
         raise ValueError("Only mean aggregation is currently supported.")
     maps = _load_explanations(explanations)
     if not maps:
         raise ValueError("No explanation maps were found to cluster.")
+    value_maps = _load_explanations(values) if values is not None else None
+    if feature_mode in {"value", "combined"} and value_maps is None:
+        raise ValueError("values are required when feature_mode is 'value' or 'combined'.")
     predicted_classes = _load_predictions(predictions) if predictions is not None else None
     if predicted_classes is not None:
-        return _cluster_by_predicted_class(maps, predicted_classes, n_clusters, output_dir)
-    return _cluster_patient_maps(maps, n_clusters, output_dir)
+        return _cluster_by_predicted_class(
+            maps,
+            value_maps,
+            predicted_classes,
+            n_clusters,
+            method,
+            feature_mode,
+            explanation_weight,
+            value_weight,
+            output_dir,
+            hdbscan_min_cluster_size,
+            hdbscan_min_samples,
+        )
+    return _cluster_patient_maps(
+        maps,
+        value_maps,
+        n_clusters,
+        method,
+        feature_mode,
+        explanation_weight,
+        value_weight,
+        output_dir,
+        hdbscan_min_cluster_size,
+        hdbscan_min_samples,
+    )
+
+
+def cluster_embeddings(
+    embeddings: pd.DataFrame | Mapping[str, np.ndarray] | np.ndarray,
+    patient_ids: Sequence[str] | None = None,
+    predictions: pd.DataFrame | Mapping[str, str] | str | Path | None = None,
+    n_clusters: int = 8,
+    method: str = "kmeans",
+    output_dir: str | Path | None = None,
+    hdbscan_min_cluster_size: int | None = None,
+    hdbscan_min_samples: int | None = None,
+) -> dict[str, object]:
+    """Cluster patient-level model embeddings and choose representative centroids."""
+    if method not in {"kmeans", "hdbscan"}:
+        raise ValueError("Only kmeans and hdbscan clustering are currently supported.")
+    ids, x = _embedding_matrix(embeddings, patient_ids)
+    if len(ids) == 0:
+        raise ValueError("No embeddings were provided.")
+    predicted_classes = _load_predictions(predictions) if predictions is not None else None
+    if predicted_classes is not None:
+        return _cluster_embeddings_by_predicted_class(
+            ids,
+            x,
+            predicted_classes,
+            n_clusters,
+            method,
+            output_dir,
+            hdbscan_min_cluster_size,
+            hdbscan_min_samples,
+        )
+    labels, k, scaled, centers = _fit_embedding_clusters(x, n_clusters, method, hdbscan_min_cluster_size, hdbscan_min_samples)
+    assignments = _embedding_assignment_frame(ids, labels, scaled, centers)
+    if output_dir is not None:
+        _write_embedding_cluster_outputs(
+            Path(output_dir),
+            assignments,
+            method,
+            n_clusters,
+            k,
+            hdbscan_min_cluster_size,
+            hdbscan_min_samples,
+            class_specific=False,
+        )
+    return {"assignments": assignments, "centroids": _centroid_records(assignments)}
 
 
 def _cluster_patient_maps(
     maps: Mapping[str, np.ndarray],
+    value_maps: Mapping[str, np.ndarray] | None,
     n_clusters: int,
+    method: str,
+    feature_mode: str,
+    explanation_weight: float,
+    value_weight: float,
     output_dir: str | Path | None,
+    hdbscan_min_cluster_size: int | None,
+    hdbscan_min_samples: int | None,
 ) -> dict[str, object]:
     patient_ids = list(maps.keys())
-    labels, k = _fit_kmeans(maps, patient_ids, n_clusters)
+    x = _feature_matrix(maps, value_maps, patient_ids, feature_mode, explanation_weight, value_weight)
+    labels, k = _fit_clusters(x, len(patient_ids), n_clusters, method, hdbscan_min_cluster_size, hdbscan_min_samples)
     assignments = pd.DataFrame({"patient_id": patient_ids, "cluster": labels})
     aggregates = {
         int(cluster): np.mean([maps[pid] for pid, label in zip(patient_ids, labels) if label == cluster], axis=0)
@@ -57,12 +150,17 @@ def _cluster_patient_maps(
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         assignments.to_csv(out / "cluster_assignments.csv", index=False)
-        metadata = {
-            "feature_mode": "explanation",
-            "class_specific": False,
-            "n_clusters_requested": n_clusters,
-            "n_clusters_used": k,
-        }
+        metadata = _cluster_metadata(
+            method,
+            n_clusters,
+            k,
+            hdbscan_min_cluster_size,
+            hdbscan_min_samples,
+            class_specific=False,
+            feature_mode=feature_mode,
+            explanation_weight=explanation_weight,
+            value_weight=value_weight,
+        )
         (out / "cluster_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         for cluster, matrix in aggregates.items():
             np.save(out / f"cluster_{cluster}.npy", matrix)
@@ -71,9 +169,16 @@ def _cluster_patient_maps(
 
 def _cluster_by_predicted_class(
     maps: Mapping[str, np.ndarray],
+    value_maps: Mapping[str, np.ndarray] | None,
     predicted_classes: Mapping[str, str],
     n_clusters: int,
+    method: str,
+    feature_mode: str,
+    explanation_weight: float,
+    value_weight: float,
     output_dir: str | Path | None,
+    hdbscan_min_cluster_size: int | None,
+    hdbscan_min_samples: int | None,
 ) -> dict[str, object]:
     grouped: dict[str, list[str]] = {}
     for patient_id in maps:
@@ -87,7 +192,8 @@ def _cluster_by_predicted_class(
     aggregates: dict[str, dict[int, np.ndarray]] = {}
     clusters_used: dict[str, int] = {}
     for predicted_class, patient_ids in sorted(grouped.items()):
-        labels, k = _fit_kmeans(maps, patient_ids, n_clusters)
+        x = _feature_matrix(maps, value_maps, patient_ids, feature_mode, explanation_weight, value_weight)
+        labels, k = _fit_clusters(x, len(patient_ids), n_clusters, method, hdbscan_min_cluster_size, hdbscan_min_samples)
         clusters_used[predicted_class] = k
         assignment_frames.append(
             pd.DataFrame(
@@ -108,12 +214,17 @@ def _cluster_by_predicted_class(
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         assignments.to_csv(out / "cluster_assignments.csv", index=False)
-        metadata = {
-            "feature_mode": "explanation",
-            "class_specific": True,
-            "n_clusters_requested_per_class": n_clusters,
-            "n_clusters_used_by_class": clusters_used,
-        }
+        metadata = _cluster_metadata(
+            method,
+            n_clusters,
+            clusters_used,
+            hdbscan_min_cluster_size,
+            hdbscan_min_samples,
+            class_specific=True,
+            feature_mode=feature_mode,
+            explanation_weight=explanation_weight,
+            value_weight=value_weight,
+        )
         (out / "cluster_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         for predicted_class, cluster_matrices in aggregates.items():
             class_dir = out / _safe_path_component(predicted_class)
@@ -123,12 +234,284 @@ def _cluster_by_predicted_class(
     return {"assignments": assignments, "aggregates": aggregates}
 
 
-def _fit_kmeans(maps: Mapping[str, np.ndarray], patient_ids: list[str], n_clusters: int) -> tuple[np.ndarray, int]:
-    x = np.stack([maps[pid].reshape(-1) for pid in patient_ids])
-    x_scaled = StandardScaler().fit_transform(x)
-    k = max(1, min(n_clusters, len(patient_ids)))
-    labels = KMeans(n_clusters=k, random_state=13, n_init=10).fit_predict(x_scaled)
+def _fit_clusters(
+    x: np.ndarray,
+    n_patients: int,
+    n_clusters: int,
+    method: str,
+    hdbscan_min_cluster_size: int | None,
+    hdbscan_min_samples: int | None,
+) -> tuple[np.ndarray, int]:
+    if method == "kmeans":
+        return _fit_kmeans(x, n_patients, n_clusters)
+    return _fit_hdbscan(x, n_patients, hdbscan_min_cluster_size, hdbscan_min_samples)
+
+
+def _fit_kmeans(x: np.ndarray, n_patients: int, n_clusters: int) -> tuple[np.ndarray, int]:
+    k = max(1, min(n_clusters, n_patients))
+    labels = KMeans(n_clusters=k, random_state=13, n_init=10).fit_predict(x)
     return labels, k
+
+
+def _fit_hdbscan(
+    x: np.ndarray,
+    n_patients: int,
+    min_cluster_size: int | None,
+    min_samples: int | None,
+) -> tuple[np.ndarray, int]:
+    if HDBSCAN is None:
+        raise ImportError("hdbscan is required for method='hdbscan'. Install it with `pip install hdbscan`.")
+    resolved_min_cluster_size = _resolve_hdbscan_min_cluster_size(min_cluster_size)
+    if resolved_min_cluster_size < 2:
+        raise ValueError("hdbscan_min_cluster_size must be at least 2.")
+    if min_samples is not None and int(min_samples) < 1:
+        raise ValueError("hdbscan_min_samples must be at least 1.")
+    if n_patients < resolved_min_cluster_size:
+        labels = np.full(n_patients, -1, dtype=int)
+        return labels, 0
+
+    clusterer = HDBSCAN(
+        min_cluster_size=resolved_min_cluster_size,
+        min_samples=None if min_samples is None else int(min_samples),
+        metric="euclidean",
+    )
+    labels = clusterer.fit_predict(x).astype(int)
+    return labels, int(np.unique(labels[labels >= 0]).size)
+
+
+def _fit_embedding_clusters(
+    x: np.ndarray,
+    n_clusters: int,
+    method: str,
+    hdbscan_min_cluster_size: int | None,
+    hdbscan_min_samples: int | None,
+) -> tuple[np.ndarray, int, np.ndarray, np.ndarray | None]:
+    scaled = StandardScaler().fit_transform(np.asarray(x, dtype=np.float64))
+    if method == "kmeans":
+        k = max(1, min(n_clusters, len(scaled)))
+        clusterer = KMeans(n_clusters=k, random_state=13, n_init=10)
+        labels = clusterer.fit_predict(scaled).astype(int)
+        return labels, k, scaled, clusterer.cluster_centers_
+    labels, k = _fit_hdbscan(scaled, len(scaled), hdbscan_min_cluster_size, hdbscan_min_samples)
+    return labels, k, scaled, None
+
+
+def _embedding_matrix(
+    embeddings: pd.DataFrame | Mapping[str, np.ndarray] | np.ndarray,
+    patient_ids: Sequence[str] | None,
+) -> tuple[list[str], np.ndarray]:
+    if isinstance(embeddings, pd.DataFrame):
+        frame = embeddings.copy()
+        if "patient_id" not in frame.columns:
+            raise ValueError("Embedding dataframe must include a patient_id column.")
+        ids = frame["patient_id"].astype(str).tolist()
+        feature_cols = [col for col in frame.columns if col != "patient_id"]
+        if not feature_cols:
+            raise ValueError("Embedding dataframe does not contain feature columns.")
+        return ids, frame[feature_cols].to_numpy(dtype=np.float64)
+    if isinstance(embeddings, Mapping):
+        ids = [str(patient_id) for patient_id in embeddings]
+        x = np.stack([np.asarray(embeddings[patient_id], dtype=np.float64).reshape(-1) for patient_id in embeddings])
+        return ids, x
+    x = np.asarray(embeddings, dtype=np.float64)
+    if x.ndim != 2:
+        raise ValueError("Embedding array must have shape [patients, features].")
+    if patient_ids is None:
+        ids = [str(i) for i in range(x.shape[0])]
+    else:
+        ids = [str(patient_id) for patient_id in patient_ids]
+    if len(ids) != x.shape[0]:
+        raise ValueError("patient_ids length must match embedding rows.")
+    return ids, x
+
+
+def _cluster_embeddings_by_predicted_class(
+    ids: list[str],
+    x: np.ndarray,
+    predicted_classes: Mapping[str, str],
+    n_clusters: int,
+    method: str,
+    output_dir: str | Path | None,
+    hdbscan_min_cluster_size: int | None,
+    hdbscan_min_samples: int | None,
+) -> dict[str, object]:
+    grouped: dict[str, list[int]] = {}
+    for idx, patient_id in enumerate(ids):
+        predicted_class = predicted_classes.get(str(patient_id))
+        if predicted_class is not None:
+            grouped.setdefault(str(predicted_class), []).append(idx)
+    if not grouped:
+        raise ValueError("No embeddings matched the patient ids in the predictions.")
+
+    assignment_frames = []
+    clusters_used: dict[str, int] = {}
+    for predicted_class, indices in sorted(grouped.items()):
+        class_ids = [ids[idx] for idx in indices]
+        labels, k, scaled, centers = _fit_embedding_clusters(
+            x[indices],
+            n_clusters,
+            method,
+            hdbscan_min_cluster_size,
+            hdbscan_min_samples,
+        )
+        clusters_used[predicted_class] = k
+        frame = _embedding_assignment_frame(class_ids, labels, scaled, centers)
+        frame.insert(1, "predicted_label", predicted_class)
+        assignment_frames.append(frame)
+
+    assignments = pd.concat(assignment_frames, ignore_index=True)
+    if output_dir is not None:
+        _write_embedding_cluster_outputs(
+            Path(output_dir),
+            assignments,
+            method,
+            n_clusters,
+            clusters_used,
+            hdbscan_min_cluster_size,
+            hdbscan_min_samples,
+            class_specific=True,
+        )
+    return {"assignments": assignments, "centroids": _centroid_records(assignments)}
+
+
+def _embedding_assignment_frame(
+    patient_ids: list[str],
+    labels: np.ndarray,
+    scaled: np.ndarray,
+    centers: np.ndarray | None,
+) -> pd.DataFrame:
+    distances = np.full(len(patient_ids), np.nan, dtype=np.float64)
+    if centers is not None:
+        for idx, label in enumerate(labels):
+            distances[idx] = float(np.linalg.norm(scaled[idx] - centers[int(label)]))
+    else:
+        for label in sorted(set(labels)):
+            indices = np.where(labels == label)[0]
+            if label == -1 or len(indices) == 0:
+                continue
+            center = scaled[indices].mean(axis=0)
+            distances[indices] = np.linalg.norm(scaled[indices] - center, axis=1)
+    return pd.DataFrame(
+        {
+            "patient_id": patient_ids,
+            "cluster": labels.astype(int),
+            "distance_to_centroid": distances,
+            "is_centroid": _centroid_flags(labels, distances),
+        }
+    )
+
+
+def _centroid_flags(labels: np.ndarray, distances: np.ndarray) -> list[bool]:
+    flags = np.zeros(len(labels), dtype=bool)
+    for label in sorted(set(labels)):
+        if label == -1:
+            continue
+        indices = np.where(labels == label)[0]
+        finite_indices = indices[np.isfinite(distances[indices])]
+        if len(finite_indices):
+            flags[finite_indices[np.argmin(distances[finite_indices])]] = True
+    return flags.tolist()
+
+
+def _centroid_records(assignments: pd.DataFrame) -> pd.DataFrame:
+    cols = ["patient_id", "cluster", "distance_to_centroid"]
+    if "predicted_label" in assignments.columns:
+        cols.insert(1, "predicted_label")
+    return assignments[assignments["is_centroid"]].loc[:, cols].reset_index(drop=True)
+
+
+def _write_embedding_cluster_outputs(
+    out: Path,
+    assignments: pd.DataFrame,
+    method: str,
+    n_clusters: int,
+    clusters_used: int | dict[str, int],
+    hdbscan_min_cluster_size: int | None,
+    hdbscan_min_samples: int | None,
+    class_specific: bool,
+) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    assignments.to_csv(out / "cluster_assignments.csv", index=False)
+    _centroid_records(assignments).to_csv(out / "cluster_centroids.csv", index=False)
+    metadata = _cluster_metadata(
+        method,
+        n_clusters,
+        clusters_used,
+        hdbscan_min_cluster_size,
+        hdbscan_min_samples,
+        class_specific=class_specific,
+        feature_mode="vit_embedding",
+        explanation_weight=1.0,
+        value_weight=1.0,
+    )
+    metadata["centroid_definition"] = "nearest patient to cluster centroid in scaled ViT embedding space"
+    (out / "cluster_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+
+def _feature_matrix(
+    maps: Mapping[str, np.ndarray],
+    value_maps: Mapping[str, np.ndarray] | None,
+    patient_ids: list[str],
+    feature_mode: str,
+    explanation_weight: float,
+    value_weight: float,
+) -> np.ndarray:
+    blocks: list[np.ndarray] = []
+    if feature_mode in {"explanation", "combined"}:
+        blocks.append(_scaled_block(maps, patient_ids) * explanation_weight)
+    if feature_mode in {"value", "combined"}:
+        if value_maps is None:
+            raise ValueError("values are required for value-based clustering.")
+        missing = [patient_id for patient_id in patient_ids if patient_id not in value_maps]
+        if missing:
+            raise ValueError(f"Missing value maps for patient ids: {missing[:5]}")
+        blocks.append(_scaled_block(value_maps, patient_ids) * value_weight)
+    return np.concatenate(blocks, axis=1)
+
+
+def _scaled_block(maps: Mapping[str, np.ndarray], patient_ids: list[str]) -> np.ndarray:
+    x = np.stack([np.asarray(maps[pid], dtype=np.float64).reshape(-1) for pid in patient_ids])
+    if np.isnan(x).any():
+        column_means = np.nanmean(x, axis=0)
+        column_means = np.where(np.isfinite(column_means), column_means, 0.0)
+        rows, cols = np.where(np.isnan(x))
+        x[rows, cols] = column_means[cols]
+    return StandardScaler().fit_transform(x)
+
+
+def _cluster_metadata(
+    method: str,
+    n_clusters: int,
+    clusters_used: int | dict[str, int],
+    hdbscan_min_cluster_size: int | None,
+    hdbscan_min_samples: int | None,
+    class_specific: bool,
+    feature_mode: str,
+    explanation_weight: float,
+    value_weight: float,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "feature_mode": feature_mode,
+        "class_specific": class_specific,
+        "clustering_method": method,
+        "explanation_weight": explanation_weight,
+        "value_weight": value_weight,
+    }
+    if class_specific:
+        metadata["n_clusters_used_by_class"] = clusters_used
+    else:
+        metadata["n_clusters_used"] = clusters_used
+    if method == "kmeans":
+        key = "n_clusters_requested_per_class" if class_specific else "n_clusters_requested"
+        metadata[key] = n_clusters
+    else:
+        metadata["hdbscan_min_cluster_size"] = _resolve_hdbscan_min_cluster_size(hdbscan_min_cluster_size)
+        metadata["hdbscan_min_samples"] = hdbscan_min_samples
+    return metadata
+
+
+def _resolve_hdbscan_min_cluster_size(min_cluster_size: int | None) -> int:
+    return 5 if min_cluster_size is None else int(min_cluster_size)
 
 
 def _load_explanations(explanations: Mapping[str, np.ndarray] | str | Path) -> dict[str, np.ndarray]:

@@ -100,10 +100,25 @@ Configure the default behavior with:
 
 ```yaml
 cluster:
+  method: kmeans
+  feature_mode: explanation
+  explanation_weight: 1.0
+  value_weight: 1.0
   n_clusters: 8
+  hdbscan_min_cluster_size: 5
+  hdbscan_min_samples: null
   plot_mode: value_with_importance_opacity
   importance_threshold: null
+  show_values: false
 ```
+
+Use `method: hdbscan` when you want HDBSCAN to infer the number of clusters from density. In that mode, `n_clusters` is ignored; tune `hdbscan_min_cluster_size` and `hdbscan_min_samples` instead. HDBSCAN noise points are kept as cluster `-1`.
+
+Use `feature_mode: combined` to cluster from both model explanations and
+clinical value trajectories. The two feature blocks are standardized separately
+before `explanation_weight` and `value_weight` are applied, so increasing
+`value_weight` makes value trajectories matter more without removing the
+explanation signal.
 
 Set `plot_mode: value_with_importance_border` if you prefer border width,
 instead of opacity, to encode importance.
@@ -116,10 +131,14 @@ the minimum opacity; in border mode, cells below the threshold do not receive an
 importance border. The threshold does not change the clinical value colors or
 the clustering itself.
 
-The same option is available from the CLI:
+Set `show_values: true` to print the mean observed value inside each heatmap
+cell. Missing cells are left unannotated.
+
+The same options are available from the CLI:
 
 ```powershell
 tsvit plot --run runs/example --importance-threshold 0.8
+tsvit plot --run runs/example --show-values
 ```
 
 This default answers:
@@ -325,19 +344,60 @@ train:
   early_stopping_min_delta: 0.0
   early_stopping_mode: auto
   restore_best_model: true
+  verbose: true
 cluster:
+  method: kmeans
+  feature_mode: explanation
+  explanation_weight: 1.0
+  value_weight: 1.0
   n_clusters: 8
+  hdbscan_min_cluster_size: 5
+  hdbscan_min_samples: null
 ```
 
 Early stopping is optional. Leave `early_stopping_patience` as `null` to train
 for the full number of epochs. When a validation split is available, each epoch
-records `val_loss` plus validation metrics in `metrics.json`. With
+prints progress and records `val_loss` plus validation metrics in `metrics.json`. With
 `restore_best_model: true`, the saved `model.pt` uses the best validation
 checkpoint according to `early_stopping_monitor`; `val_loss` is minimized, while
 metrics such as `val_macro_f1`, `val_accuracy`, and `val_auroc` are maximized
 when `early_stopping_mode: auto`.
 
 ## Python Usage
+
+For notebook experiments, use a data module plus a model module so each stage
+can be rerun independently:
+
+```python
+from interpretable_ts_vit.config import ClusterConfig, DataConfig, ModelConfig, TrainConfig
+from interpretable_ts_vit.data_modules import MIMICHypotensionDataModule
+from interpretable_ts_vit.model_modules import ViTTimeSeriesModule
+
+data = MIMICHypotensionDataModule(
+    records_path="data/mimic_hypotension/records.csv",
+    labels_path="data/mimic_hypotension/labels.csv",
+    processed_dir="data/processed",
+    data_config=DataConfig(granularity="30min"),
+)
+
+model = ViTTimeSeriesModule(
+    run_dir="runs/hypotension_v1",
+    model_config=ModelConfig(patch_size=(1, 4)),
+    train_config=TrainConfig(epochs=3, verbose=True),
+    cluster_config=ClusterConfig(n_clusters=4, show_values=True),
+)
+
+data.prepare()
+model.fit(data)
+model.evaluate(data, split="test")
+model.explain(data, split="test")
+model.cluster_explanations(data, split="test")
+model.plot_cluster_values(data, split="test")
+model.display_cluster_heatmaps(split="test")
+```
+
+The lower-level API remains available when you want to manage tensors and model
+objects yourself:
 
 ```python
 import pandas as pd

@@ -43,14 +43,22 @@ def train_model(
     min_delta = float(getattr(config, "early_stopping_min_delta", 0.0))
     mode = _resolve_monitor_mode(monitor, getattr(config, "early_stopping_mode", "auto"))
     restore_best_model = bool(getattr(config, "restore_best_model", True))
+    verbose = bool(getattr(config, "verbose", True))
+    progress_interval_batches = getattr(config, "progress_interval_batches", 50)
     best_value: float | None = None
     best_epoch: int | None = None
     best_state: dict[str, torch.Tensor] | None = None
     bad_epochs = 0
+    if verbose:
+        print(
+            f"Training on {len(train_dataset)} examples for up to {config.epochs} epoch(s) "
+            f"with {len(loader)} batch(es)/epoch on {device}.",
+            flush=True,
+        )
     for epoch in range(config.epochs):
         model.train()
         losses = []
-        for x, y in loader:
+        for batch_idx, (x, y) in enumerate(loader, start=1):
             x = x.to(device)
             y = y.to(device)
             optimizer.zero_grad(set_to_none=True)
@@ -58,6 +66,13 @@ def train_model(
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
+            if _should_print_batch_progress(verbose, progress_interval_batches, batch_idx, len(loader)):
+                running_loss = float(np.mean(losses))
+                print(
+                    f"Epoch {epoch + 1}/{config.epochs} - batch {batch_idx}/{len(loader)} "
+                    f"- train_loss_running={running_loss:.4f}",
+                    flush=True,
+                )
         row = {"epoch": float(epoch + 1), "train_loss": float(np.mean(losses))}
         improved_this_epoch = False
         if val_dataset is not None:
@@ -77,7 +92,11 @@ def train_model(
             available = ", ".join(sorted(row))
             raise ValueError(f"early_stopping_monitor '{monitor}' is not available. Available metrics: {available}")
         history.append(row)
+        if verbose:
+            print(_format_epoch_progress(row, epoch + 1, config.epochs), flush=True)
         if early_stopping_patience is not None and val_dataset is not None and not improved_this_epoch and bad_epochs >= early_stopping_patience:
+            if verbose:
+                print(f"Early stopping after epoch {epoch + 1}: {monitor} did not improve for {bad_epochs} epoch(s).", flush=True)
             break
     if restore_best_model and best_state is not None:
         model.load_state_dict(best_state)
@@ -147,6 +166,32 @@ def predict_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: Tr
     return np.concatenate(logits), y_true
 
 
+@torch.no_grad()
+def extract_model_embeddings(
+    model: nn.Module,
+    dataset: BinnedTimeSeriesDataset,
+    config: TrainConfig | None = None,
+    embedding: str = "cls",
+) -> tuple[list[str], np.ndarray]:
+    """Return patient ids and ViT embeddings from a trained model."""
+    if embedding != "cls":
+        raise ValueError("Only embedding='cls' is currently supported.")
+    if not hasattr(model, "forward_features"):
+        raise ValueError("Model does not expose forward_features for embedding extraction.")
+    config = config or TrainConfig()
+    device = resolve_device(config.device)
+    model.to(device)
+    model.eval()
+    loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=False)
+    embeddings = []
+    for batch in loader:
+        x = batch[0] if isinstance(batch, (list, tuple)) else batch
+        features = model.forward_features(x.to(device))
+        embeddings.append(features.detach().cpu().numpy())
+    patient_ids = [str(patient_id) for patient_id in (dataset.patient_ids or [str(i) for i in range(len(dataset))])]
+    return patient_ids, np.concatenate(embeddings, axis=0)
+
+
 def evaluate_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: TrainConfig | None = None) -> dict[str, Any]:
     """Compute accuracy, macro F1, AUROC when possible, and confusion matrix."""
     logits, y_true = predict_model(model, dataset, config)
@@ -185,6 +230,29 @@ def _is_improvement(current: float, best: float, mode: str, min_delta: float) ->
 
 def _copy_state_dict_to_cpu(model: nn.Module) -> dict[str, torch.Tensor]:
     return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+
+def _format_epoch_progress(row: dict[str, float], epoch: int, total_epochs: int) -> str:
+    metrics = []
+    for key, value in row.items():
+        if key == "epoch":
+            continue
+        metrics.append(f"{key}={_format_metric_value(value)}")
+    return f"Epoch {epoch}/{total_epochs} - " + " - ".join(metrics)
+
+
+def _should_print_batch_progress(verbose: bool, interval: int | None, batch_idx: int, total_batches: int) -> bool:
+    if not verbose or interval is None or interval <= 0:
+        return False
+    return batch_idx == 1 or batch_idx == total_batches or batch_idx % interval == 0
+
+
+def _format_metric_value(value: Any) -> str:
+    if isinstance(value, (float, np.floating)):
+        if np.isfinite(value):
+            return f"{float(value):.4f}"
+        return str(float(value))
+    return str(value)
 
 
 def _jsonable(value: Any) -> Any:

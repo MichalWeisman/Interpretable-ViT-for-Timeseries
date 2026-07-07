@@ -52,13 +52,15 @@ class TrainConfig:
     early_stopping_min_delta: float = 0.0
     early_stopping_mode: str = "auto"
     restore_best_model: bool = True
+    verbose: bool = True
+    progress_interval_batches: int | None = 50
 
 
 @dataclass
 class ExplainConfig:
     """Explanation method options."""
 
-    method: str = "grad_attention_rollout"
+    method: str = "transformer_attribution"
     target_class: int | None = None
 
 
@@ -68,9 +70,17 @@ class ClusterConfig:
 
     n_clusters: int = 8
     method: str = "kmeans"
+    feature_mode: str = "explanation"
+    explanation_weight: float = 1.0
+    value_weight: float = 1.0
+    hdbscan_min_cluster_size: int | None = 5
+    hdbscan_min_samples: int | None = None
     aggregate: str = "mean"
     plot_mode: str = "value_with_importance_opacity"
     importance_threshold: float | None = None
+    show_values: bool = False
+    normal_ranges_path: str | None = None
+    use_normal_ranges: bool = False
 
 
 @dataclass

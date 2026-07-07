@@ -14,14 +14,14 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from .binning import TimeSeriesBinner
-from .clustering import cluster_explanations
+from .clustering import cluster_embeddings, cluster_explanations
 from .config import Config
 from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
 from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
-from .training import evaluate_model, predict_model, train_model
-from .visualization import aggregate_cluster_value_matrices, plot_value_heatmap
+from .training import evaluate_model, extract_model_embeddings, predict_model, train_model
+from .visualization import aggregate_cluster_value_matrices, cluster_assignment_counts, patient_value_matrix, plot_value_heatmap, value_ranges_by_variable
 
 
 @dataclass
@@ -114,6 +114,8 @@ def run_pipeline(run_config: PipelineRunConfig | None = None) -> PipelineResult:
             run_config.render_instance_heatmaps,
             config.cluster.plot_mode,
             config.cluster.importance_threshold,
+            config.cluster.show_values,
+            _normal_ranges_arg(config),
         )
         artifacts["cluster_heatmaps"] = str(Path(paths.run_dir) / "cluster_heatmaps" / run_config.split)
         artifacts["cluster_values"] = str(Path(paths.run_dir) / "cluster_values" / run_config.split)
@@ -208,7 +210,7 @@ def _load_evaluate_and_save(config: Config, run_dir: str | Path, split: str) -> 
     return metrics
 
 
-def _explain_and_save(config: Config, run_dir: str | Path, split: str) -> None:
+def _explain_and_save(config: Config, run_dir: str | Path, split: str, show_progress: bool = True) -> None:
     run_dir = Path(run_dir)
     model = load_model(run_dir)
     dataset = load_split(run_dir / f"{split}.npz")
@@ -219,18 +221,50 @@ def _explain_and_save(config: Config, run_dir: str | Path, split: str) -> None:
         target_class=config.explain.target_class,
         output_dir=run_dir / "explanations" / split,
         device=config.train.device,
+        show_progress=show_progress,
     )
 
 
 def _cluster_and_save(config: Config, run_dir: str | Path, split: str) -> None:
     run_dir = Path(run_dir)
+    if config.cluster.feature_mode == "vit_embedding":
+        model = load_model(run_dir)
+        dataset = load_split(run_dir / f"{split}.npz")
+        patient_ids, embeddings = extract_model_embeddings(model, dataset, config.train)
+        out = run_dir / "clusters" / split
+        out.mkdir(parents=True, exist_ok=True)
+        embedding_frame = pd.DataFrame(embeddings, columns=[f"embedding_{idx}" for idx in range(embeddings.shape[1])])
+        embedding_frame.insert(0, "patient_id", patient_ids)
+        embedding_frame.to_csv(out / "vit_embeddings.csv", index=False)
+        cluster_embeddings(
+            embeddings,
+            patient_ids=patient_ids,
+            predictions=_find_predictions_path(run_dir, split),
+            n_clusters=config.cluster.n_clusters,
+            method=config.cluster.method,
+            output_dir=out,
+            hdbscan_min_cluster_size=config.cluster.hdbscan_min_cluster_size,
+            hdbscan_min_samples=config.cluster.hdbscan_min_samples,
+        )
+        return
+    value_maps = None
+    if config.cluster.feature_mode in {"value", "combined"}:
+        dataset = load_split(run_dir / f"{split}.npz")
+        binner = TimeSeriesBinner.load(run_dir / "binner.json")
+        value_maps = _denormalized_patient_value_maps(dataset, binner)
     cluster_explanations(
         run_dir / "explanations" / split,
         predictions=_find_predictions_path(run_dir, split),
+        values=value_maps,
         n_clusters=config.cluster.n_clusters,
         method=config.cluster.method,
+        feature_mode=config.cluster.feature_mode,
+        explanation_weight=config.cluster.explanation_weight,
+        value_weight=config.cluster.value_weight,
         aggregate=config.cluster.aggregate,
         output_dir=run_dir / "clusters" / split,
+        hdbscan_min_cluster_size=config.cluster.hdbscan_min_cluster_size,
+        hdbscan_min_samples=config.cluster.hdbscan_min_samples,
     )
 
 
@@ -240,6 +274,8 @@ def _plot_and_save(
     render_instance_heatmaps: bool,
     plot_mode: str = "value_with_importance_opacity",
     importance_threshold: float | None = None,
+    show_values: bool = False,
+    normal_ranges: str | Path | None = None,
 ) -> None:
     run_dir = Path(run_dir)
     binner = TimeSeriesBinner.load(run_dir / "binner.json")
@@ -249,31 +285,33 @@ def _plot_and_save(
     value_dir = run_dir / "cluster_values" / split
     heatmap_dir = run_dir / "cluster_heatmaps" / split
     matrices_by_cluster = aggregate_cluster_value_matrices(dataset, assignments_path, binner, output_dir=value_dir)
+    counts_by_cluster = cluster_assignment_counts(assignments_path)
     importance_style = _importance_style(plot_mode)
     importance_by_cluster = _cluster_importance_matrices(cluster_dir) if importance_style is not None else {}
     matrices = list(matrices_by_cluster.values())
     if matrices:
-        vmin = min(float(np.nanmin(matrix)) for matrix in matrices)
-        vmax = max(float(np.nanmax(matrix)) for matrix in matrices)
+        vmin, vmax = value_ranges_by_variable(matrices)
         for cluster_key, matrix in matrices_by_cluster.items():
             plot_value_heatmap(
                 matrix,
                 binner.variable_vocab_,
                 binner.time_bins_,
                 _cluster_heatmap_path(heatmap_dir, cluster_key),
-                title=_cluster_title(cluster_key),
+                title=_cluster_title(cluster_key, counts_by_cluster.get(cluster_key)),
                 vmin=vmin,
                 vmax=vmax,
                 importance_matrix=_importance_for_key(importance_by_cluster, cluster_key),
                 importance_style=importance_style or "opacity",
                 importance_threshold=importance_threshold,
+                show_values=show_values,
+                normal_ranges=normal_ranges,
             )
+    _plot_embedding_centroids(run_dir, split, dataset, binner, normal_ranges, show_values)
     if render_instance_heatmaps:
         instance_dir = run_dir / "instance_heatmaps" / split
         instance_maps = _denormalized_patient_value_maps(dataset, binner)
         if instance_maps:
-            vmin = min(float(np.nanmin(matrix)) for matrix in instance_maps.values())
-            vmax = max(float(np.nanmax(matrix)) for matrix in instance_maps.values())
+            vmin, vmax = value_ranges_by_variable(list(instance_maps.values()))
             for patient_id, matrix in instance_maps.items():
                 plot_value_heatmap(
                     matrix,
@@ -283,7 +321,43 @@ def _plot_and_save(
                     title=patient_id,
                     vmin=vmin,
                     vmax=vmax,
+                    show_values=show_values,
+                    normal_ranges=normal_ranges,
                 )
+
+
+def _plot_embedding_centroids(
+    run_dir: Path,
+    split: str,
+    dataset,
+    binner: TimeSeriesBinner,
+    normal_ranges: str | Path | None,
+    show_values: bool,
+) -> None:
+    centroids_path = run_dir / "clusters" / split / "cluster_centroids.csv"
+    if not centroids_path.exists():
+        return
+    centroid_frame = pd.read_csv(centroids_path)
+    if centroid_frame.empty:
+        return
+    output_dir = run_dir / "cluster_centroid_heatmaps" / split
+    for row in centroid_frame.to_dict("records"):
+        patient_id = str(row["patient_id"])
+        prefix_parts = []
+        if "predicted_label" in row and pd.notna(row["predicted_label"]):
+            prefix_parts.append(_safe_path_component(str(row["predicted_label"])))
+        prefix_parts.append(f"cluster_{int(row['cluster'])}")
+        output = output_dir.joinpath(*prefix_parts)
+        matrix = patient_value_matrix(dataset, binner, patient_id)
+        plot_value_heatmap(
+            matrix,
+            binner.variable_vocab_,
+            binner.time_bins_,
+            output / f"centroid_patient_{_safe_path_component(patient_id)}.png",
+            title=f"Centroid representative {patient_id}",
+            show_values=show_values,
+            normal_ranges=normal_ranges,
+        )
 
 
 def _cluster_importance_matrices(cluster_dir: Path) -> dict[int | tuple[str, int], np.ndarray]:
@@ -321,11 +395,16 @@ def _cluster_heatmap_path(output_dir: Path, key: int | tuple[str, int]) -> Path:
     return output_dir / f"cluster_{key}.png"
 
 
-def _cluster_title(key: int | tuple[str, int]) -> str:
+def _cluster_title(key: int | tuple[str, int], count: int | None = None) -> str:
+    suffix = f" (n={count})" if count is not None else ""
     if isinstance(key, tuple):
         predicted_label, cluster = key
-        return f"Class {predicted_label}: cluster_{cluster}"
-    return f"cluster_{key}"
+        return f"Class {predicted_label}: {_cluster_label(cluster)}{suffix}"
+    return f"{_cluster_label(key)}{suffix}"
+
+
+def _cluster_label(cluster: int) -> str:
+    return "noise (-1)" if cluster == -1 else f"cluster_{cluster}"
 
 
 def _importance_for_key(
@@ -364,6 +443,14 @@ def _denormalized_patient_value_maps(dataset, binner: TimeSeriesBinner) -> dict[
     raw_values = values * stds[None, :, :] + means[None, :, :]
     raw_values[mask == 0] = np.nan
     return {patient_id: raw_values[idx] for idx, patient_id in enumerate(dataset.patient_ids)}
+
+
+def _normal_ranges_arg(config: Config) -> str | Path | None:
+    if config.cluster.normal_ranges_path is not None:
+        return config.cluster.normal_ranges_path
+    if config.cluster.use_normal_ranges:
+        return Path(__file__).with_name("normal_ranges.json")
+    return None
 
 
 def _stratify_or_none(labels: list[str]) -> list[str] | None:

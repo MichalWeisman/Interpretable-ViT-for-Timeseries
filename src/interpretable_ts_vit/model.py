@@ -38,8 +38,13 @@ class TransformerEncoderLayerWithAttention(nn.Module):
             nn.Dropout(dropout),
         )
         self.last_attn: torch.Tensor | None = None
+        self.last_input: torch.Tensor | None = None
+        self.last_output: torch.Tensor | None = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.last_input = x
+        if x.requires_grad:
+            x.retain_grad()
         attn_input = self.norm1(x)
         attn_out, attn_weights = self.attn(
             attn_input,
@@ -52,7 +57,9 @@ class TransformerEncoderLayerWithAttention(nn.Module):
         if attn_weights.requires_grad:
             attn_weights.retain_grad()
         x = x + attn_out
-        return x + self.mlp(self.norm2(x))
+        output = x + self.mlp(self.norm2(x))
+        self.last_output = output
+        return output
 
 
 class ViTTimeSeriesClassifier(nn.Module):
@@ -102,6 +109,15 @@ class ViTTimeSeriesClassifier(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Return class logits for a batch of binned tensors."""
+        features = self.forward_features(x)
+        return self.head(features)
+
+    def forward_features(self, x: torch.Tensor, return_tokens: bool = False) -> torch.Tensor:
+        """Return final transformer features before the classification head.
+
+        By default this returns the final CLS-token embedding for each patient.
+        Set `return_tokens=True` to return all normalized tokens.
+        """
         patches = self.patchify(x)
         tokens = self.patch_embed(patches)
         cls = self.cls_token.expand(tokens.shape[0], -1, -1)
@@ -110,7 +126,7 @@ class ViTTimeSeriesClassifier(nn.Module):
         for block in self.blocks:
             tokens = block(tokens)
         tokens = self.norm(tokens)
-        return self.head(tokens[:, 0])
+        return tokens if return_tokens else tokens[:, 0]
 
     def patchify(self, x: torch.Tensor) -> torch.Tensor:
         """Flatten variable-time patches into transformer tokens."""
