@@ -12,3 +12,4 @@ data/mimic_cache/
 mimic-iv-*.zip
 mimic-iv-*/
 data/mimic_hypotension_local_poc
+.tools/
