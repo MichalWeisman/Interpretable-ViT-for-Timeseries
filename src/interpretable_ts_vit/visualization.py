@@ -486,10 +486,22 @@ def plot_value_heatmap(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ranges = load_normal_ranges(normal_ranges) if normal_ranges is not None else None
     fig_width = max(8, min(24, len(time_bins) * 0.28))
+    range_lines = _normal_range_lines(variables, ranges) if ranges is not None else []
     if ranges is not None:
-        fig_width += 2.8
+        fig_width += max(4.0, min(7.0, max((len(line) for line in range_lines), default=18) * 0.07))
     fig_height = max(4, min(18, len(variables) * 0.32))
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    if ranges is not None:
+        fig, (ax, cax, ranges_ax) = plt.subplots(
+            1,
+            3,
+            figsize=(fig_width, fig_height),
+            constrained_layout=True,
+            gridspec_kw={"width_ratios": [1.0, 0.035, 0.28], "wspace": 0.18},
+        )
+    else:
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        cax = None
+        ranges_ax = None
     cmap = (NORMAL_RANGE_CMAP if ranges is not None else VALUE_HEATMAP_CMAP).with_extremes(bad="#d9d9d9")
     importance = np.asarray(importance_matrix) if importance_matrix is not None else None
     alpha = (
@@ -525,24 +537,37 @@ def plot_value_heatmap(
     ax.set_ylabel("Variable")
     if title:
         ax.set_title(title)
-    colorbar = fig.colorbar(image, ax=ax, label=value_scale_label)
+    colorbar = fig.colorbar(image, ax=ax, cax=cax, label=value_scale_label)
     if ranges is not None:
         colorbar.set_ticks([-1.0, 0.0, 1.0])
         colorbar.set_ticklabels(["Low", "Normal", "High"])
         colorbar.ax.yaxis.set_ticks_position("left")
-        colorbar.ax.tick_params(labelsize=8, pad=4)
-        range_lines = _normal_range_lines(variables, ranges)
-        if range_lines:
-            colorbar.ax.text(
-                1.7,
-                0.5,
-                "Normal ranges\n" + "\n".join(range_lines),
-                transform=colorbar.ax.transAxes,
+        colorbar.ax.yaxis.set_label_position("right")
+        colorbar.ax.tick_params(labelsize=9, pad=6)
+        if ranges_ax is not None:
+            ranges_ax.axis("off")
+        if range_lines and ranges_ax is not None:
+            ranges_ax.text(
+                0.0,
+                1.0,
+                "Normal ranges",
+                transform=ranges_ax.transAxes,
                 ha="left",
-                va="center",
-                fontsize=7,
+                va="top",
+                fontsize=10,
+                fontweight="bold",
                 color="black",
-                linespacing=1.25,
+            )
+            ranges_ax.text(
+                0.0,
+                0.92,
+                "\n".join(range_lines),
+                transform=ranges_ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=8.5,
+                color="black",
+                linespacing=1.45,
             )
     else:
         colorbar.set_ticks([])
@@ -562,7 +587,8 @@ def plot_value_heatmap(
             fontsize=8,
             color="black",
         )
-    fig.tight_layout()
+    if ranges is None:
+        fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
 
