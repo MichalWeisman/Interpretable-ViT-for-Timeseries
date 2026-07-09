@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Sequence
 
 import numpy as np
@@ -13,6 +14,9 @@ try:
 except ImportError:
     torch = None
     Dataset = object
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +43,12 @@ class BinnedTimeSeriesDataset(Dataset):
         self.x = torch.as_tensor(x, dtype=torch.float32)
         self.y = None if y is None else torch.as_tensor(y, dtype=torch.long)
         self.patient_ids = [str(i) for i in patient_ids] if patient_ids is not None else None
+        logger.info(
+            "Created BinnedTimeSeriesDataset: x_shape=%s, labels=%s, patient_ids=%s",
+            tuple(self.x.shape),
+            self.y is not None,
+            self.patient_ids is not None,
+        )
 
     def __len__(self) -> int:
         return int(self.x.shape[0])

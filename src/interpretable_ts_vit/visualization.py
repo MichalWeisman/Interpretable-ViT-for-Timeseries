@@ -26,7 +26,13 @@ VALUE_HEATMAP_CMAP = LinearSegmentedColormap.from_list(
 )
 NORMAL_RANGE_CMAP = LinearSegmentedColormap.from_list(
     "value_low_normal_high",
-    ["#1e88e5", "#f2f2f2", "#ff0051"],
+    [
+        (0.0, "#1e88e5"),
+        (0.4, "#f2f7ff"),
+        (0.5, "#f7f7f7"),
+        (0.6, "#fff1f4"),
+        (1.0, "#ff0051"),
+    ],
 )
 
 
@@ -59,7 +65,7 @@ def plot_explanation_heatmap(
         ax.set_title(title)
     fig.colorbar(image, ax=ax, label="Explanation score")
     fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -242,7 +248,7 @@ def plot_patient_matrices(
     explanations: Mapping[str, np.ndarray] | str | Path,
     output_dir: str | Path,
     *,
-    show_values: bool = False,
+    show_values: bool = True,
     explanation_threshold: float | None = None,
     explanation_threshold_mode: str = "absolute",
     plot_explanation: bool = True,
@@ -418,7 +424,14 @@ def normal_range_status_matrix(
     variables: Sequence[str],
     normal_ranges: Mapping[str, object] | str | Path | None = None,
 ) -> np.ndarray:
-    """Convert values to -1 low, 0 normal, 1 high using per-variable ranges."""
+    """Convert values to continuous low/normal/high scores per variable.
+
+    Values below the normal range are scaled from the row's finite minimum to
+    the normal lower bound, giving darker blues for lower values and near-white
+    blues as values approach normal. Values inside the normal range receive a
+    subtle blue-white-red gradient around zero. Values above the normal range
+    are scaled from the normal upper bound to the row's finite maximum.
+    """
     ranges = load_normal_ranges(normal_ranges)
     matrix = np.asarray(matrix, dtype=np.float64)
     status = np.full_like(matrix, np.nan, dtype=np.float64)
@@ -430,10 +443,42 @@ def normal_range_status_matrix(
         high = spec.get("high")
         if low is None or high is None:
             continue
-        values = matrix[row]
-        status[row] = np.where(values < float(low), -1.0, np.where(values > float(high), 1.0, 0.0))
-        status[row, ~np.isfinite(values)] = np.nan
+        status[row] = _normal_range_status_row(matrix[row], float(low), float(high))
     return status
+
+
+def _normal_range_status_row(values: np.ndarray, low: float, high: float) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    status = np.full_like(values, np.nan, dtype=np.float64)
+    finite_mask = np.isfinite(values)
+    finite = values[finite_mask]
+    if finite.size == 0 or not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        return status
+
+    row_min = float(np.min(finite))
+    row_max = float(np.max(finite))
+    low_mask = finite_mask & (values < low)
+    normal_mask = finite_mask & (values >= low) & (values <= high)
+    high_mask = finite_mask & (values > high)
+
+    if np.any(low_mask):
+        if row_min < low:
+            status[low_mask] = -1.0 + (values[low_mask] - row_min) / (low - row_min)
+        else:
+            status[low_mask] = -0.15
+    if np.any(normal_mask):
+        midpoint = (low + high) / 2.0
+        half_width = (high - low) / 2.0
+        if half_width > 0:
+            status[normal_mask] = 0.18 * (values[normal_mask] - midpoint) / half_width
+        else:
+            status[normal_mask] = 0.0
+    if np.any(high_mask):
+        if row_max > high:
+            status[high_mask] = (values[high_mask] - high) / (row_max - high)
+        else:
+            status[high_mask] = 0.15
+    return np.clip(status, -1.0, 1.0)
 
 
 def _normal_range_lines(variables: Sequence[str], ranges: Mapping[str, Mapping[str, object]]) -> list[str]:
@@ -477,7 +522,8 @@ def plot_value_heatmap(
     clinical units. `importance_threshold` is an optional quantile in `[0, 1]`;
     for example, `0.8` emphasizes only cells at or above the 80th percentile
     of finite importance scores. Set `show_values=True` to annotate each
-    finite cell with its mean observed value.
+    finite cell with its mean observed value. Gray cells have no observed
+    value in the plotted cluster or patient.
     """
     if importance_style not in {"opacity", "border"}:
         raise ValueError("importance_style must be either 'opacity' or 'border'.")
@@ -537,6 +583,16 @@ def plot_value_heatmap(
     ax.set_ylabel("Variable")
     if title:
         ax.set_title(title)
+    ax.text(
+        0.0,
+        -0.16,
+        "Cell values: mean observed clinical value; gray cells: no observed value.",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8,
+        color="black",
+    )
     colorbar = fig.colorbar(image, ax=ax, cax=cax, label=value_scale_label)
     if ranges is not None:
         colorbar.set_ticks([-1.0, 0.0, 1.0])
@@ -589,7 +645,7 @@ def plot_value_heatmap(
         )
     if ranges is None:
         fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -666,7 +722,7 @@ def _annotate_heatmap_values(
     for row in range(matrix.shape[0]):
         for col in range(matrix.shape[1]):
             value = matrix[row, col]
-            if not np.isfinite(value):
+            if not np.isfinite(value) or not np.isfinite(display_matrix[row, col]):
                 continue
             red, green, blue, _ = image.cmap(image.norm(display_matrix[row, col]))
             alpha = image.get_alpha()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 
 from ..binning import TimeSeriesBinner
@@ -10,6 +11,9 @@ from ..config import Config, DataConfig
 from ..data import BinnedTimeSeriesDataset
 from ..io import load_split
 from ..pipeline import _prepare_tensor_splits
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,16 +25,25 @@ class BaseDataModule:
 
     def prepare(self) -> None:
         """Prepare tensor splits under `processed_dir`."""
+        required = [self.binner_path, *(self.split_path(split) for split in ("train", "val", "test"))]
+        if all(path.exists() for path in required):
+            logger.info("Prepared tensor files already exist under %s; skipping preparation", self.processed_dir)
+            return
         records_path, labels_path = self.input_paths()
+        logger.info("Preparing tensor splits under %s from records=%s labels=%s", self.processed_dir, records_path, labels_path)
         _prepare_tensor_splits(records_path, labels_path, Config(data=self.data_config), self.processed_dir)
+        logger.info("Prepared tensor splits under %s", self.processed_dir)
 
     def load(self) -> "BaseDataModule":
         """Load preprocessing metadata and return this module for chaining."""
+        logger.info("Loading data module metadata from %s", self.binner_path)
         self._binner = TimeSeriesBinner.load(self.binner_path)
+        logger.info("Loaded data module metadata from %s", self.binner_path)
         return self
 
     def split(self, name: str) -> BinnedTimeSeriesDataset:
         """Load one prepared split by name, such as `train`, `val`, or `test`."""
+        logger.info("Loading %s split from data module at %s", name, self.split_path(name))
         return load_split(self.split_path(name))
 
     def input_paths(self) -> tuple[Path, Path]:

@@ -3,8 +3,10 @@ import pandas as pd
 import pytest
 
 from interpretable_ts_vit import TimeSeriesBinner
-from interpretable_ts_vit.clustering import cluster_explanations
+from interpretable_ts_vit.autoencoder import cluster_explanation_value_autoencoder
+from interpretable_ts_vit.config import ClusterConfig
 from interpretable_ts_vit.data import BinnedTimeSeriesDataset
+from interpretable_ts_vit.pipeline import _cluster_title, _denormalized_patient_value_maps
 from interpretable_ts_vit.visualization import (
     aggregate_cluster_value_matrices,
     cluster_assignment_counts,
@@ -57,6 +59,11 @@ def test_cluster_value_aggregation_uses_observed_raw_values(tmp_path):
     assert (tmp_path / "cluster_0.png").exists()
 
 
+def test_cluster_heatmap_defaults_show_values_and_predicted_class_title():
+    assert ClusterConfig().show_values is True
+    assert _cluster_title(("true", 0), 7) == "Predicted class true: cluster_0 (n=7)"
+
+
 def test_importance_clustering_and_value_importance_opacity(tmp_path):
     records = pd.DataFrame(
         [
@@ -88,13 +95,23 @@ def test_importance_clustering_and_value_importance_opacity(tmp_path):
         "p4": np.array([[0.8], [0.2]]),
     }
 
-    clustered = cluster_explanations(
+    values = _denormalized_patient_value_maps(dataset, binner)
+    clustered = cluster_explanation_value_autoencoder(
         explanations,
+        values,
+        validation_explanations=explanations,
+        validation_values=values,
+        cluster_explanations=explanations,
+        cluster_values=values,
         predictions={"p1": "false", "p2": "true", "p3": "false", "p4": "true"},
         n_clusters=2,
         output_dir=tmp_path / "clusters",
+        latent_dim=2,
+        epochs=1,
+        batch_size=2,
+        device="cpu",
     )
-    assert set(clustered["assignments"].columns) == {"patient_id", "predicted_label", "cluster"}
+    assert {"patient_id", "predicted_label", "cluster", "distance_to_centroid", "is_centroid"}.issubset(clustered["assignments"].columns)
     assert (tmp_path / "clusters" / "cluster_metadata.json").exists()
     assert (tmp_path / "clusters" / "false" / "cluster_0.npy").exists()
     assert (tmp_path / "clusters" / "true" / "cluster_0.npy").exists()
@@ -114,7 +131,7 @@ def test_importance_clustering_and_value_importance_opacity(tmp_path):
             binner.variable_vocab_,
             binner.time_bins_,
             class_dir / f"overlay_{cluster}.png",
-            importance_matrix=clustered["aggregates"][predicted_label][cluster],
+            importance_matrix=np.load(tmp_path / "clusters" / predicted_label / f"cluster_{cluster}.npy"),
             importance_threshold=0.8,
         )
         plot_value_heatmap(
@@ -122,7 +139,7 @@ def test_importance_clustering_and_value_importance_opacity(tmp_path):
             binner.variable_vocab_,
             binner.time_bins_,
             class_dir / f"border_{cluster}.png",
-            importance_matrix=clustered["aggregates"][predicted_label][cluster],
+            importance_matrix=np.load(tmp_path / "clusters" / predicted_label / f"cluster_{cluster}.npy"),
             importance_style="border",
             importance_threshold=0.8,
         )
@@ -185,6 +202,20 @@ def test_value_heatmap_supports_normal_range_status_coloring(tmp_path):
         normal_ranges=ranges,
     )
     assert (tmp_path / "normal_ranges.png").exists()
+
+
+def test_normal_range_status_coloring_uses_shades_within_each_range():
+    matrix = np.array([[55.0, 58.0, 60.0, 70.0, 90.0, 100.0, 110.0, 120.0]])
+    ranges = {"heart_rate": {"low": 60.0, "high": 100.0}}
+
+    status = normal_range_status_matrix(matrix, ["heart_rate"], ranges)[0]
+
+    assert np.isclose(status[0], -1.0)
+    assert -1.0 < status[1] < 0.0
+    assert status[2] < status[3] < status[4] < status[5]
+    assert 0.0 < status[6] < 1.0
+    assert np.isclose(status[7], 1.0)
+    assert len(set(np.round(status, 3))) == len(status)
 
 
 def test_relative_time_ticks_use_one_unit():

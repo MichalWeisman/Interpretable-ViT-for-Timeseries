@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,9 @@ import pandas as pd
 
 from .config import DataConfig
 from .data import BinnedTimeSeries
+
+
+logger = logging.getLogger(__name__)
 
 
 AGGREGATIONS = {"mean", "median", "min", "max", "first", "last"}
@@ -52,8 +56,14 @@ class TimeSeriesBinner:
         files. If time bounds are not configured, they are inferred from the
         records passed to `fit`, so callers should pass training records only.
         """
+        logger.info("Fitting time-series binner")
         records_df = self._read_table(records)
         records_df = self._prepare_records(records_df)
+        logger.info(
+            "Prepared records for binner fit: rows=%d, patients=%d",
+            len(records_df),
+            records_df[self.config.patient_id_col].astype(str).nunique(),
+        )
         self.variable_vocab_ = sorted(records_df[self.config.variable_col].astype(str).unique().tolist())
         self.time_start_ = pd.Timestamp(self.config.time_start) if self.config.time_start else records_df[self.config.timestamp_col].min().floor(self.config.granularity)
         self.time_end_ = pd.Timestamp(self.config.time_end) if self.config.time_end else records_df[self.config.timestamp_col].max().ceil(self.config.granularity)
@@ -69,6 +79,15 @@ class TimeSeriesBinner:
             names = sorted(labels_df[self.config.label_col].astype(str).unique().tolist())
             self.index_to_label_ = names
             self.label_to_index_ = {label: idx for idx, label in enumerate(names)}
+            logger.info("Prepared labels for binner fit: rows=%d, classes=%s", len(labels_df), names)
+        logger.info(
+            "Fitted binner: variables=%d, time_bins=%d, time_range=[%s, %s), aggregation=%s",
+            len(self.variable_vocab_),
+            len(self.time_bins_),
+            self.time_start_,
+            self.time_end_,
+            self.config.aggregation,
+        )
         return self
 
     def transform(self, records: pd.DataFrame | str | Path, labels: pd.DataFrame | dict | str | Path | None = None) -> BinnedTimeSeries:
@@ -79,6 +98,7 @@ class TimeSeriesBinner:
         """
         if self.time_start_ is None or self.time_end_ is None:
             raise RuntimeError("TimeSeriesBinner must be fitted before transform.")
+        logger.info("Transforming records into binned tensors")
         records_df = self._prepare_records(self._read_table(records))
         labels_df = self._prepare_labels(labels) if labels is not None else None
         if labels_df is not None:
@@ -97,6 +117,14 @@ class TimeSeriesBinner:
         work = work[work[self.config.patient_id_col].isin(pid_index)]
         work = work[work[self.config.variable_col].isin(var_index)]
         work = work[(work[self.config.timestamp_col] >= self.time_start_) & (work[self.config.timestamp_col] < self.time_end_)]
+        logger.info(
+            "Prepared transform frame: input_rows=%d, usable_rows=%d, patients=%d, variables=%d, time_bins=%d",
+            len(records_df),
+            len(work),
+            n_patients,
+            n_vars,
+            n_steps,
+        )
         if len(work):
             delta = pd.to_timedelta(self.config.granularity)
             bin_idx = ((work[self.config.timestamp_col] - self.time_start_) / delta).astype(int)
@@ -123,6 +151,8 @@ class TimeSeriesBinner:
                 missing = labels_df.loc[pd.isna(y), self.config.label_col].unique().tolist()
                 raise ValueError(f"Labels not seen during fit: {missing}")
             y = y.astype(np.int64)
+        observed = int(x[:, 1].sum())
+        logger.info("Created binned tensor: x_shape=%s, observed_cells=%d, labels=%s", x.shape, observed, y is not None)
         return BinnedTimeSeries(patient_ids=patient_ids, x=x, y=y, label_names=label_names)
 
     def fit_transform(self, records: pd.DataFrame | str | Path, labels: pd.DataFrame | dict | str | Path | None = None) -> BinnedTimeSeries:
@@ -143,12 +173,15 @@ class TimeSeriesBinner:
             "index_to_label": self.index_to_label_,
         }
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Saving binner metadata to %s", path)
         with Path(path).open("w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
+        logger.info("Saved binner metadata to %s", path)
 
     @classmethod
     def load(cls, path: str | Path) -> "TimeSeriesBinner":
         """Load a previously saved binner."""
+        logger.info("Loading binner metadata from %s", path)
         with Path(path).open("r", encoding="utf-8") as fh:
             payload = json.load(fh)
         binner = cls(DataConfig(**payload["config"]))
@@ -160,6 +193,7 @@ class TimeSeriesBinner:
         binner.stds_ = {str(k): float(v) for k, v in payload["stds"].items()}
         binner.label_to_index_ = {str(k): int(v) for k, v in payload["label_to_index"].items()}
         binner.index_to_label_ = payload["index_to_label"]
+        logger.info("Loaded binner metadata from %s: variables=%d, time_bins=%d", path, len(binner.variable_vocab_), len(binner.time_bins_))
         return binner
 
     def _refresh_time_bins(self) -> None:
@@ -213,8 +247,11 @@ class TimeSeriesBinner:
     @staticmethod
     def _read_table(table: pd.DataFrame | str | Path) -> pd.DataFrame:
         if isinstance(table, pd.DataFrame):
+            logger.debug("Using in-memory table: rows=%d, columns=%s", len(table), list(table.columns))
             return table
         path = Path(table)
         if path.suffix.lower() in {".parquet", ".pq"}:
+            logger.info("Reading Parquet table from %s", path)
             return pd.read_parquet(path)
+        logger.info("Reading CSV table from %s", path)
         return pd.read_csv(path)

@@ -43,8 +43,6 @@ class TransformerEncoderLayerWithAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.last_input = x
-        if x.requires_grad:
-            x.retain_grad()
         attn_input = self.norm1(x)
         attn_out, attn_weights = self.attn(
             attn_input,

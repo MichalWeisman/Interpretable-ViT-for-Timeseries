@@ -60,8 +60,9 @@ class TrainConfig:
 class ExplainConfig:
     """Explanation method options."""
 
-    method: str = "transformer_attribution"
+    method: str = "grad_attention_rollout"
     target_class: int | None = None
+    batch_size: int = 16
 
 
 @dataclass
@@ -70,15 +71,18 @@ class ClusterConfig:
 
     n_clusters: int = 8
     method: str = "kmeans"
-    feature_mode: str = "explanation"
-    explanation_weight: float = 1.0
-    value_weight: float = 1.0
+    feature_mode: str = "autoencoder"
+    autoencoder_latent_dim: int = 16
+    autoencoder_epochs: int = 50
+    autoencoder_learning_rate: float = 1e-3
+    autoencoder_batch_size: int = 32
+    autoencoder_early_stopping_patience: int | None = 10
     hdbscan_min_cluster_size: int | None = 5
     hdbscan_min_samples: int | None = None
     aggregate: str = "mean"
     plot_mode: str = "value_with_importance_opacity"
     importance_threshold: float | None = None
-    show_values: bool = False
+    show_values: bool = True
     normal_ranges_path: str | None = None
     use_normal_ranges: bool = False
 

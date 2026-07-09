@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -12,21 +13,25 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+from .autoencoder import cluster_autoencoder_embeddings, create_explanation_value_embeddings, train_explanation_value_autoencoder
 from .binning import TimeSeriesBinner
-from .clustering import cluster_embeddings, cluster_explanations
 from .config import load_config
 from .data import BinnedTimeSeriesDataset
 from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
 from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
-from .training import extract_model_embeddings, predict_model, train_model
+from .training import predict_model, train_model
 from .visualization import aggregate_cluster_value_matrices, cluster_assignment_counts, patient_value_matrix, plot_value_heatmap, value_ranges_by_variable
+
+
+logger = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> None:
     """Parse CLI arguments and dispatch to the selected workflow command."""
     parser = argparse.ArgumentParser(prog="tsvit")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     sub = parser.add_subparsers(dest="command", required=True)
 
     prepare = sub.add_parser("prepare-data")
@@ -42,7 +47,7 @@ def main(argv: list[str] | None = None) -> None:
     mimic.add_argument("--prediction-hours", type=float, default=6.0)
     mimic.add_argument("--threshold", type=float, default=65.0, help="MAP threshold in mmHg for hypotension.")
     mimic.add_argument("--chunk-size", type=int, default=1_000_000)
-    mimic.add_argument("--cache-dir", default="data/mimic_cache")
+    mimic.add_argument("--cache-dir", default="data/hypotension/mimic_cache")
     mimic.add_argument("--read-zip-directly", action="store_true", help="Do not extract selected .csv.gz files before reading.")
     mimic.add_argument("--no-filtered-cache", action="store_true", help="Do not read/write the filtered chartevents Parquet cache.")
     mimic.add_argument("--progress-interval-chunks", type=int, default=1)
@@ -59,17 +64,14 @@ def main(argv: list[str] | None = None) -> None:
     explain = sub.add_parser("explain")
     explain.add_argument("--run", required=True)
     explain.add_argument("--split", default="test")
-    explain.add_argument("--method")
     explain.add_argument("--target-class", type=int)
+    explain.add_argument("--batch-size", type=int)
 
     cluster = sub.add_parser("cluster")
     cluster.add_argument("--run", required=True)
     cluster.add_argument("--split", default="test")
     cluster.add_argument("--n-clusters", type=int)
     cluster.add_argument("--method", choices=["kmeans", "hdbscan"])
-    cluster.add_argument("--feature-mode", choices=["explanation", "value", "combined", "vit_embedding"])
-    cluster.add_argument("--explanation-weight", type=float)
-    cluster.add_argument("--value-weight", type=float)
     cluster.add_argument("--hdbscan-min-cluster-size", type=int)
     cluster.add_argument("--hdbscan-min-samples", type=int)
     cluster.add_argument("--config")
@@ -90,6 +92,8 @@ def main(argv: list[str] | None = None) -> None:
     plot.add_argument("--normal-ranges", help="Path to a JSON file of normal ranges.")
 
     args = parser.parse_args(argv)
+    logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logger.info("Running command %s", args.command)
     if args.command == "prepare-data":
         cmd_prepare_data(args)
     elif args.command == "prepare-mimic-hypotension":
@@ -109,8 +113,10 @@ def cmd_prepare_data(args) -> None:
     config = load_config(args.config)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    logger.info("Preparing data tensors from records=%s labels=%s into %s", args.records, args.labels, out)
     records = pd.read_csv(args.records)
     labels = pd.read_csv(args.labels)
+    logger.info("Loaded source tables for tensor preparation: records=%d, labels=%d", len(records), len(labels))
     patient_ids = labels[config.data.patient_id_col].astype(str).tolist()
     y = labels[config.data.label_col].astype(str).tolist()
     train_ids, holdout_ids, _, holdout_y = train_test_split(
@@ -128,21 +134,26 @@ def cmd_prepare_data(args) -> None:
         stratify=holdout_y if len(set(holdout_y)) > 1 else None,
     )
     split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
+    logger.info("Created patient splits: train=%d, val=%d, test=%d", len(train_ids), len(val_ids), len(test_ids))
     train_labels = labels[labels[config.data.patient_id_col].astype(str).isin(train_ids)]
     train_records = records[records[config.data.patient_id_col].astype(str).isin(train_ids)]
+    logger.info("Fitting binner on train split: records=%d, labels=%d", len(train_records), len(train_labels))
     binner = TimeSeriesBinner(config.data).fit(train_records, train_labels)
     for split, ids in split_ids.items():
         split_labels = labels[labels[config.data.patient_id_col].astype(str).isin(ids)]
         split_records = records[records[config.data.patient_id_col].astype(str).isin(ids)]
+        logger.info("Preparing %s tensor split: records=%d, labels=%d", split, len(split_records), len(split_labels))
         binned = binner.transform(split_records, split_labels)
         save_split(out / f"{split}.npz", binned.patient_ids, binned.x, binned.y)
     save_metadata(out, binner)
     with (out / "splits.json").open("w", encoding="utf-8") as fh:
         json.dump(split_ids, fh, indent=2)
+    logger.info("Finished preparing data tensors into %s", out)
 
 
 def cmd_prepare_mimic_hypotension(args) -> None:
     """Create generic records/labels files for MIMIC-IV hypotension prediction."""
+    logger.info("Preparing MIMIC-IV hypotension CSV files into %s", args.out)
     config = MIMICHypotensionConfig(
         mimic_path=args.mimic_path,
         observation_hours=args.observation_hours,
@@ -160,6 +171,7 @@ def cmd_prepare_mimic_hypotension(args) -> None:
     )
     prepared = MIMICIVHypotensionAdapter(config).prepare()
     prepared.save(args.out)
+    logger.info("Finished preparing MIMIC-IV hypotension CSV files into %s", args.out)
 
 
 def cmd_train(args) -> None:
@@ -168,6 +180,7 @@ def cmd_train(args) -> None:
     data_dir = Path(args.data)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    logger.info("Loading training data from %s", data_dir)
     train_ds = load_split(data_dir / "train.npz")
     val_ds = load_split(data_dir / "val.npz")
     binner = TimeSeriesBinner.load(data_dir / "binner.json")
@@ -180,6 +193,7 @@ def cmd_train(args) -> None:
     )
     model = ViTTimeSeriesClassifier(model_config)
     metrics = train_model(model, train_ds, val_ds, config.train, out)
+    logger.info("Copying prepared data artifacts from %s to %s", data_dir, out)
     shutil.copyfile(data_dir / "binner.json", out / "binner.json")
     shutil.copyfile(data_dir / "variable_vocab.json", out / "variable_vocab.json")
     for split in ["train", "val", "test"]:
@@ -200,9 +214,15 @@ def cmd_explain(args) -> None:
     config = load_config(None)
     model = load_model(run)
     dataset = load_split(run / f"{args.split}.npz")
-    method = args.method or config.explain.method
     out = run / "explanations" / args.split
-    explain_model(model, dataset, method=method, target_class=args.target_class, output_dir=out)
+    explain_model(
+        model,
+        dataset,
+        method="grad_attention_rollout",
+        target_class=args.target_class,
+        output_dir=out,
+        batch_size=args.batch_size or config.explain.batch_size,
+    )
 
 
 def cmd_cluster(args) -> None:
@@ -211,9 +231,6 @@ def cmd_cluster(args) -> None:
     config = load_config(args.config).cluster
     n_clusters = args.n_clusters or config.n_clusters
     method = args.method or config.method
-    feature_mode = args.feature_mode or config.feature_mode
-    explanation_weight = args.explanation_weight if args.explanation_weight is not None else config.explanation_weight
-    value_weight = args.value_weight if args.value_weight is not None else config.value_weight
     hdbscan_min_cluster_size = (
         args.hdbscan_min_cluster_size
         if args.hdbscan_min_cluster_size is not None
@@ -222,41 +239,58 @@ def cmd_cluster(args) -> None:
     hdbscan_min_samples = args.hdbscan_min_samples if args.hdbscan_min_samples is not None else config.hdbscan_min_samples
     explanation_dir = run / "explanations" / args.split
     out = run / "clusters" / args.split
-    if feature_mode == "vit_embedding":
-        model = load_model(run)
-        dataset = load_split(run / f"{args.split}.npz")
-        patient_ids, embeddings = extract_model_embeddings(model, dataset, load_config(args.config).train)
-        out.mkdir(parents=True, exist_ok=True)
-        embedding_frame = pd.DataFrame(embeddings, columns=[f"embedding_{idx}" for idx in range(embeddings.shape[1])])
-        embedding_frame.insert(0, "patient_id", patient_ids)
-        embedding_frame.to_csv(out / "vit_embeddings.csv", index=False)
-        cluster_embeddings(
-            embeddings,
-            patient_ids=patient_ids,
-            predictions=_find_predictions_path(run, args.split),
-            n_clusters=n_clusters,
-            method=method,
-            output_dir=out,
-            hdbscan_min_cluster_size=hdbscan_min_cluster_size,
-            hdbscan_min_samples=hdbscan_min_samples,
+    full_config = load_config(args.config)
+    model = load_model(run)
+    for autoencoder_split in _autoencoder_required_splits(args.split):
+        autoencoder_explanation_dir = run / "explanations" / autoencoder_split
+        explain_model(
+            model,
+            load_split(run / f"{autoencoder_split}.npz"),
+            method="grad_attention_rollout",
+            target_class=full_config.explain.target_class,
+            output_dir=autoencoder_explanation_dir,
+            device=full_config.train.device,
+            show_progress=False,
+            batch_size=full_config.explain.batch_size,
         )
-        return
-    value_maps = None
-    if feature_mode in {"value", "combined"}:
-        dataset = load_split(run / f"{args.split}.npz")
-        binner = TimeSeriesBinner.load(run / "binner.json")
-        value_maps = _denormalized_patient_value_maps(dataset, binner)
-    cluster_explanations(
+    train_dataset = load_split(run / "train.npz")
+    val_dataset = load_split(run / "val.npz")
+    dataset = load_split(run / f"{args.split}.npz")
+    binner = TimeSeriesBinner.load(run / "binner.json")
+    trained = train_explanation_value_autoencoder(
+        run / "explanations" / "train",
+        _denormalized_patient_value_maps(train_dataset, binner),
+        validation_explanations=run / "explanations" / "val",
+        validation_values=_denormalized_patient_value_maps(val_dataset, binner),
+        output_dir=out,
+        latent_dim=config.autoencoder_latent_dim,
+        epochs=config.autoencoder_epochs,
+        learning_rate=config.autoencoder_learning_rate,
+        batch_size=config.autoencoder_batch_size,
+        device=full_config.train.device,
+        early_stopping_patience=config.autoencoder_early_stopping_patience,
+    )
+    embedded = create_explanation_value_embeddings(
         explanation_dir,
+        _denormalized_patient_value_maps(dataset, binner),
+        model=trained["model"],
+        preprocessor=trained["preprocessor"],
+        output_dir=out,
+        batch_size=config.autoencoder_batch_size,
+        device=full_config.train.device,
+    )
+    cluster_autoencoder_embeddings(
+        embedded["embedding_frame"],
+        explanations=embedded["explanations"],
         predictions=_find_predictions_path(run, args.split),
-        values=value_maps,
         n_clusters=n_clusters,
         method=method,
-        feature_mode=feature_mode,
-        explanation_weight=explanation_weight,
-        value_weight=value_weight,
-        aggregate=config.aggregate,
         output_dir=out,
+        autoencoder_metrics=trained["metrics"] | {"cluster_loss": embedded["loss"]},
+        autoencoder_metadata={
+            **trained["metadata"],
+            "cluster": {"n_patients": len(embedded["patient_ids"]), **embedded["metadata"]},
+        },
         hdbscan_min_cluster_size=hdbscan_min_cluster_size,
         hdbscan_min_samples=hdbscan_min_samples,
     )
@@ -297,7 +331,7 @@ def cmd_plot(args) -> None:
                 importance_matrix=_importance_for_key(importance_by_cluster, cluster_key),
                 importance_style=importance_style or "opacity",
                 importance_threshold=importance_threshold,
-                show_values=show_values,
+                show_values=True,
                 normal_ranges=normal_ranges,
             )
     _plot_embedding_centroids(run, args.split, dataset, binner, normal_ranges, show_values)
@@ -315,7 +349,7 @@ def cmd_plot(args) -> None:
                     title=patient_id,
                     vmin=vmin,
                     vmax=vmax,
-                    show_values=show_values,
+                    show_values=True,
                     normal_ranges=normal_ranges,
                 )
 
@@ -348,8 +382,8 @@ def _plot_embedding_centroids(
             binner.variable_vocab_,
             binner.time_bins_,
             output / f"centroid_patient_{_safe_path_component(patient_id)}.png",
-            title=f"Centroid representative {patient_id}",
-            show_values=show_values,
+            title=_centroid_title(patient_id, row),
+            show_values=True,
             normal_ranges=normal_ranges,
         )
 
@@ -395,6 +429,10 @@ def _find_predictions_path(run_dir: Path, split: str) -> Path | None:
     return None
 
 
+def _autoencoder_required_splits(split: str) -> list[str]:
+    return list(dict.fromkeys(["train", "val", split]))
+
+
 def _cluster_heatmap_path(output_dir: Path, key: int | tuple[str, int]) -> Path:
     if isinstance(key, tuple):
         predicted_label, cluster = key
@@ -406,8 +444,14 @@ def _cluster_title(key: int | tuple[str, int], count: int | None = None) -> str:
     suffix = f" (n={count})" if count is not None else ""
     if isinstance(key, tuple):
         predicted_label, cluster = key
-        return f"Class {predicted_label}: {_cluster_label(cluster)}{suffix}"
+        return f"Predicted class {predicted_label}: {_cluster_label(cluster)}{suffix}"
     return f"{_cluster_label(key)}{suffix}"
+
+
+def _centroid_title(patient_id: str, row: dict[str, object]) -> str:
+    if "predicted_label" in row and pd.notna(row["predicted_label"]):
+        return f"Predicted class {row['predicted_label']}: centroid representative {patient_id}"
+    return f"Centroid representative {patient_id}"
 
 
 def _cluster_label(cluster: int) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,9 @@ from torch.utils.data import DataLoader
 
 from .config import TrainConfig
 from .data import BinnedTimeSeriesDataset
+
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_device(device: str) -> torch.device:
@@ -35,6 +39,13 @@ def train_model(
     device = resolve_device(config.device)
     model.to(device)
     loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    logger.info(
+        "Created training DataLoader: examples=%d, batches=%d, batch_size=%d, shuffle=True, device=%s",
+        len(train_dataset),
+        len(loader),
+        config.batch_size,
+        device,
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     criterion = nn.CrossEntropyLoss()
     history: list[dict[str, float]] = []
@@ -131,6 +142,13 @@ def evaluate_loss(
     model.to(device)
     model.eval()
     loader = DataLoader(dataset, batch_size=config.batch_size)
+    logger.info(
+        "Created evaluation loss DataLoader: examples=%d, batches=%d, batch_size=%d, device=%s",
+        len(dataset),
+        len(loader),
+        config.batch_size,
+        device,
+    )
     criterion = criterion or nn.CrossEntropyLoss()
     total_loss = 0.0
     total_examples = 0
@@ -153,6 +171,13 @@ def predict_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: Tr
     model.to(device)
     model.eval()
     loader = DataLoader(dataset, batch_size=config.batch_size)
+    logger.info(
+        "Created prediction DataLoader: examples=%d, batches=%d, batch_size=%d, device=%s",
+        len(dataset),
+        len(loader),
+        config.batch_size,
+        device,
+    )
     logits = []
     labels = []
     for batch in loader:
@@ -166,50 +191,47 @@ def predict_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: Tr
     return np.concatenate(logits), y_true
 
 
-@torch.no_grad()
-def extract_model_embeddings(
-    model: nn.Module,
-    dataset: BinnedTimeSeriesDataset,
-    config: TrainConfig | None = None,
-    embedding: str = "cls",
-) -> tuple[list[str], np.ndarray]:
-    """Return patient ids and ViT embeddings from a trained model."""
-    if embedding != "cls":
-        raise ValueError("Only embedding='cls' is currently supported.")
-    if not hasattr(model, "forward_features"):
-        raise ValueError("Model does not expose forward_features for embedding extraction.")
-    config = config or TrainConfig()
-    device = resolve_device(config.device)
-    model.to(device)
-    model.eval()
-    loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=False)
-    embeddings = []
-    for batch in loader:
-        x = batch[0] if isinstance(batch, (list, tuple)) else batch
-        features = model.forward_features(x.to(device))
-        embeddings.append(features.detach().cpu().numpy())
-    patient_ids = [str(patient_id) for patient_id in (dataset.patient_ids or [str(i) for i in range(len(dataset))])]
-    return patient_ids, np.concatenate(embeddings, axis=0)
-
-
 def evaluate_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: TrainConfig | None = None) -> dict[str, Any]:
-    """Compute accuracy, macro F1, AUROC when possible, and confusion matrix."""
+    """Compute classification metrics and confusion-derived binary rates."""
     logits, y_true = predict_model(model, dataset, config)
     y_pred = logits.argmax(axis=1)
+    n_classes = int(logits.shape[1])
     metrics: dict[str, Any] = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
-        "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
+        "confusion_matrix": confusion_matrix(y_true, y_pred, labels=np.arange(n_classes)).tolist(),
     }
     try:
         probs = torch.softmax(torch.as_tensor(logits), dim=1).numpy()
-        if probs.shape[1] == 2:
-            metrics["auroc"] = float(roc_auc_score(y_true, probs[:, 1]))
+        if n_classes == 2:
+            metrics["auc"] = float(roc_auc_score(y_true, probs[:, 1]))
         else:
-            metrics["auroc"] = float(roc_auc_score(y_true, probs, multi_class="ovr"))
+            metrics["auc"] = float(roc_auc_score(y_true, probs, multi_class="ovr"))
     except ValueError:
-        metrics["auroc"] = None
+        metrics["auc"] = None
+    metrics["auroc"] = metrics["auc"]
+    metrics.update(_binary_confusion_metrics(y_true, y_pred, n_classes))
     return metrics
+
+
+def _binary_confusion_metrics(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> dict[str, float | None]:
+    if n_classes != 2:
+        return {"tpr": None, "fpr": None, "tnr": None, "fnr": None, "ppv": None}
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    return {
+        "tpr": _safe_ratio(tp, tp + fn),
+        "fpr": _safe_ratio(fp, fp + tn),
+        "tnr": _safe_ratio(tn, tn + fp),
+        "fnr": _safe_ratio(fn, fn + tp),
+        "ppv": _safe_ratio(tp, tp + fp),
+    }
+
+
+def _safe_ratio(numerator: int | np.integer, denominator: int | np.integer) -> float | None:
+    denominator = int(denominator)
+    if denominator == 0:
+        return None
+    return float(int(numerator) / denominator)
 
 
 def _resolve_monitor_mode(monitor: str, mode: str) -> str:

@@ -24,9 +24,9 @@ The binner converts each patient into a two-channel tensor `[2, variables, times
 ## CLI
 
 ```powershell
-tsvit prepare-mimic-hypotension --mimic-path mimic-iv-3.1.zip --out data/mimic_hypotension
-tsvit prepare-data --records records.csv --labels labels.csv --out data/processed --config config.yaml
-tsvit train --data data/processed --out runs/example --config config.yaml
+tsvit prepare-mimic-hypotension --mimic-path mimic-iv-3.1.zip --out data/hypotension/mimic_hypotension
+tsvit prepare-data --records records.csv --labels labels.csv --out data/hypotension/processed --config config.yaml
+tsvit train --data data/hypotension/processed --out runs/example --config config.yaml
 tsvit explain --run runs/example --split test
 tsvit cluster --run runs/example --split test
 tsvit plot --run runs/example
@@ -34,118 +34,52 @@ tsvit plot --run runs/example
 
 The same functionality is available from Python through `interpretable_ts_vit`.
 
-## Importance-Clustered Value Heatmaps
+## Autoencoder-Clustered Value Heatmaps
 
-The default plotted heatmaps use one interpretation path:
+The current notebook and pipeline use one interpretation path:
 
-1. Split patients by the model's predicted class.
-2. Within each predicted class, cluster patients by their model-importance maps.
-3. For each class-specific cluster, plot the patients' mean observed clinical values.
-4. Use opacity or border width to show where the model was most important.
+1. Generate per-patient model explanations with `grad_attention_rollout` only.
+2. Pair each explanation map with the patient's denormalized clinical value map.
+3. Train a small autoencoder on train `[explanation, value]` maps and validate it on validation maps.
+4. Encode the selected split with that autoencoder and cluster the latent vectors within each predicted class.
+5. Plot cluster-level mean clinical value heatmaps, with opacity or border width showing mean rollout importance.
 
-The resulting patterns are organized by predicted class:
-
-```text
-Class True:
-  cluster_0
-  cluster_1
-  ...
-Class False:
-  cluster_0
-  cluster_1
-  ...
-```
-
-Each PNG under:
+Saved artifacts are reused when present:
 
 ```text
-runs/<run_name>/cluster_heatmaps/<split>/<predicted_class>/
+data/hypotension/processed_full_hypotension_importance_values/{train,val,test}.npz
+runs/full_hypotension_importance_values/model.pt
+runs/full_hypotension_importance_values/explanations/<split>/*.npy
+runs/full_hypotension_importance_values/clusters/<split>/autoencoder.pt
+runs/full_hypotension_importance_values/clusters/<split>/autoencoder_embeddings.csv
+runs/full_hypotension_importance_values/clusters/<split>/autoencoder_metrics.json
 ```
 
-shows the mean observed clinical value for each variable/time bin among the
-patients assigned to that predicted class and importance-derived cluster. Rows
-are variables in the persisted training order. Columns are relative time bins;
-the x-axis label shows the inferred bin granularity, such as `30min bins`, and
-each tick is elapsed time from the first bin.
-
-Visual encoding:
-
-- color = mean observed clinical value
-- blue = lower value
-- red = higher value
-- opacity or border width = mean model importance
-- optional importance threshold = only the most important cells are emphasized
-- gray = no observations for that variable/time cell
-
-The colorbar is labeled `Mean Observed Value`. It intentionally has no numeric
-ticks: the bottom is labeled `Low` and the top is labeled `High`. Different
-rows can represent different clinical units, so the colorbar should be read as
-low-to-high within the plotted value scale, not as a single shared clinical
-unit.
-
-The pipeline still may generate explanation maps in:
-
-```text
-runs/<run_name>/explanations/<split>/
-```
-
-Those maps are used to group similar model-reasoning patterns during the
-`cluster` step and to control opacity or border width in the heatmap. When a
-predictions CSV is available, clustering is done separately for each
-`predicted_label`, so `cluster_0` under `True` is unrelated to `cluster_0`
-under `False`. The explanation maps are **not** what the heatmap color
-represents.
-
-Configure the default behavior with:
+Configure clustering with:
 
 ```yaml
 cluster:
+  feature_mode: autoencoder
   method: kmeans
-  feature_mode: explanation
-  explanation_weight: 1.0
-  value_weight: 1.0
   n_clusters: 8
-  hdbscan_min_cluster_size: 5
-  hdbscan_min_samples: null
+  autoencoder_latent_dim: 16
+  autoencoder_epochs: 50
+  autoencoder_learning_rate: 0.001
+  autoencoder_batch_size: 32
+  autoencoder_early_stopping_patience: 10
   plot_mode: value_with_importance_opacity
   importance_threshold: null
-  show_values: false
+  show_values: true
 ```
 
 Use `method: hdbscan` when you want HDBSCAN to infer the number of clusters from density. In that mode, `n_clusters` is ignored; tune `hdbscan_min_cluster_size` and `hdbscan_min_samples` instead. HDBSCAN noise points are kept as cluster `-1`.
 
-Use `feature_mode: combined` to cluster from both model explanations and
-clinical value trajectories. The two feature blocks are standardized separately
-before `explanation_weight` and `value_weight` are applied, so increasing
-`value_weight` makes value trajectories matter more without removing the
-explanation signal.
+Visual encoding:
 
-Set `plot_mode: value_with_importance_border` if you prefer border width,
-instead of opacity, to encode importance.
-
-Set `importance_threshold` to a quantile between `0` and `1` to emphasize only
-the most important regions. For example, `importance_threshold: 0.8` keeps
-visual emphasis only for cells at or above the 80th percentile of the cluster's
-finite importance scores. In opacity mode, cells below the threshold fade to
-the minimum opacity; in border mode, cells below the threshold do not receive an
-importance border. The threshold does not change the clinical value colors or
-the clustering itself.
-
-Set `show_values: true` to print the mean observed value inside each heatmap
-cell. Missing cells are left unannotated.
-
-The same options are available from the CLI:
-
-```powershell
-tsvit plot --run runs/example --importance-threshold 0.8
-tsvit plot --run runs/example --show-values
-```
-
-This default answers:
-
-> Among patients predicted as the same class, which patients caused the model
-> to focus on similar variable/time regions, and what were their actual
-> measurements in those regions?
+- color = mean observed clinical value
+- opacity or border width = mean `grad_attention_rollout` importance
+- gray = no observations for that variable/time cell
+- optional cell label = mean observed clinical value
 
 ### How Cluster Values Are Computed
 
@@ -154,42 +88,14 @@ Prepared tensors have shape `[patients, 2, variables, timesteps]`:
 - channel 0, `D`: normalized values
 - channel 1, `M`: observed-value mask
 
-Missing cells are stored as `D=0, M=0`. Because zero is also a possible numeric
-value after normalization, missing cells must not be averaged directly. For a
-cluster, the heatmap matrix is computed as:
+Missing cells are stored as `D=0, M=0`. Cluster value matrices are computed from denormalized observed values only:
 
 ```text
 raw_value = normalized_value * training_std(variable) + training_mean(variable)
-cluster_value(variable, time) =
-    sum(raw_value * mask) / sum(mask)
+cluster_value(variable, time) = sum(raw_value * mask) / sum(mask)
 ```
 
-If `sum(mask) == 0` for a variable/time cell, no patient in that cluster has an
-observation there. The output matrix stores `NaN` for that cell and the plot
-renders it as gray.
-
-The numeric cluster matrices are saved separately in:
-
-```text
-runs/<run_name>/cluster_values/<split>/<predicted_class>/cluster_<id>.npy
-```
-
-The PNGs are saved in:
-
-```text
-runs/<run_name>/cluster_heatmaps/<split>/<predicted_class>/cluster_<id>.png
-```
-
-### Important Interpretation Note
-
-Rows can represent different clinical units, such as heart rate, blood
-pressure, respiratory rate, or oxygen saturation. A single color scale across
-all rows means the colorbar is literal numeric value, but the clinical meaning
-of "high" still depends on the row. For example, `100` means something
-different for heart rate than for oxygen saturation.
-
-Use these heatmaps to inspect temporal value patterns inside clusters, not as a
-unit-normalized severity scale across unrelated variables.
+If `sum(mask) == 0`, the output matrix stores `NaN` and the plot renders that cell as gray.
 
 ## MIMIC-IV Hypotension Dataset
 
@@ -198,15 +104,19 @@ reads either the original PhysioNet zip archive or an extracted MIMIC-IV
 directory, then writes the generic `records.csv` and `labels.csv` files used by
 the rest of the pipeline.
 
+Dataset-specific files live under `data/<dataset>/`; notebooks follow the same
+layout under `notebooks/<dataset>/`. For example, the hypotension assets are in
+`data/hypotension/` and `notebooks/hypotension/`.
+
 ```powershell
 tsvit prepare-mimic-hypotension `
   --mimic-path mimic-iv-3.1.zip `
-  --out data/mimic_hypotension `
+  --out data/hypotension/mimic_hypotension `
   --observation-hours 24 `
   --prediction-hours 6 `
   --threshold 65 `
   --chunk-size 1000000 `
-  --cache-dir data/mimic_cache
+  --cache-dir data/hypotension/mimic_cache
 ```
 
 Each row in `labels.csv` corresponds to an ICU `stay_id`. By default, the label
@@ -225,10 +135,10 @@ The cache is an intermediate speed-up layer. It is **not** the model input and
 it is **not** the tensor dataset. You can delete it and regenerate it from the
 MIMIC zip.
 
-By default, `--cache-dir data/mimic_cache` contains two kinds of files:
+By default, `--cache-dir data/hypotension/mimic_cache` contains two kinds of files:
 
 ```text
-data/mimic_cache/
+data/hypotension/mimic_cache/
   extracted/
     icu/
       icustays.csv.gz
@@ -260,21 +170,22 @@ still giving a practical time-left estimate.
 The portable pre-tensor output is still:
 
 ```text
-data/mimic_hypotension/
+data/hypotension/mimic_hypotension/
   records.csv
   labels.csv
   dataset_metadata.json
 ```
 
 If you create data on one computer and train on another, copy
-`data/mimic_hypotension/`. You usually do not need to copy `data/mimic_cache/`.
+`data/hypotension/mimic_hypotension/`. You usually do not need to copy
+`data/hypotension/mimic_cache/`.
 
 To disable cache behavior:
 
 ```powershell
 tsvit prepare-mimic-hypotension `
   --mimic-path mimic-iv-3.1.zip `
-  --out data/mimic_hypotension `
+  --out data/hypotension/mimic_hypotension `
   --read-zip-directly `
   --no-filtered-cache
 ```
@@ -282,7 +193,7 @@ tsvit prepare-mimic-hypotension `
 After creating the MIMIC records and labels, run:
 
 ```powershell
-tsvit prepare-data --records data/mimic_hypotension/records.csv --labels data/mimic_hypotension/labels.csv --out data/processed --config config.yaml
+tsvit prepare-data --records data/hypotension/mimic_hypotension/records.csv --labels data/hypotension/mimic_hypotension/labels.csv --out data/hypotension/processed --config config.yaml
 ```
 
 To add another dataset, implement `DatasetAdapter.prepare()` and return a
@@ -347,10 +258,13 @@ train:
   verbose: true
 cluster:
   method: kmeans
-  feature_mode: explanation
-  explanation_weight: 1.0
-  value_weight: 1.0
+  feature_mode: autoencoder
   n_clusters: 8
+  autoencoder_latent_dim: 16
+  autoencoder_epochs: 50
+  autoencoder_learning_rate: 0.001
+  autoencoder_batch_size: 32
+  autoencoder_early_stopping_patience: 10
   hdbscan_min_cluster_size: 5
   hdbscan_min_samples: null
 ```
@@ -360,7 +274,7 @@ for the full number of epochs. When a validation split is available, each epoch
 prints progress and records `val_loss` plus validation metrics in `metrics.json`. With
 `restore_best_model: true`, the saved `model.pt` uses the best validation
 checkpoint according to `early_stopping_monitor`; `val_loss` is minimized, while
-metrics such as `val_macro_f1`, `val_accuracy`, and `val_auroc` are maximized
+metrics such as `val_macro_f1`, `val_accuracy`, `val_auc`, and `val_auroc` are maximized
 when `early_stopping_mode: auto`.
 
 ## Python Usage
@@ -374,9 +288,9 @@ from interpretable_ts_vit.data_modules import MIMICHypotensionDataModule
 from interpretable_ts_vit.model_modules import ViTTimeSeriesModule
 
 data = MIMICHypotensionDataModule(
-    records_path="data/mimic_hypotension/records.csv",
-    labels_path="data/mimic_hypotension/labels.csv",
-    processed_dir="data/processed",
+    records_path="data/hypotension/mimic_hypotension/records.csv",
+    labels_path="data/hypotension/mimic_hypotension/labels.csv",
+    processed_dir="data/hypotension/processed",
     data_config=DataConfig(granularity="30min"),
 )
 
@@ -430,10 +344,12 @@ metrics = train_model(model, dataset)
 
 `prepare-data` writes train/validation/test `.npz` files plus `binner.json`
 and `variable_vocab.json`. `train` writes `model.pt`, `metrics.json`, and
-`predictions.csv`. `explain` writes per-patient explanation maps. `cluster`
+`predictions.csv`. Evaluation metrics include `auc`/`auroc`, `tpr`, `fpr`,
+`tnr`, `fnr`, `ppv`, accuracy, macro F1, and the confusion matrix. `explain`
+writes per-patient explanation maps. `cluster`
 writes cluster assignments and explanation-space cluster averages. `plot`
-writes `cluster_values/*.npy` and PNG value heatmaps whose colors represent
-mean observed clinical values, not explanation scores.
+writes `cluster_values/*.npy` and PNG value heatmaps whose colors and cell
+labels represent mean observed clinical values, not explanation scores.
 
 ## Notes
 

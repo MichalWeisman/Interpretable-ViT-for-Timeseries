@@ -90,3 +90,35 @@ def test_prepared_dataset_save_writes_expected_files(tmp_path):
     assert (tmp_path / "prepared" / "records.csv").exists()
     assert (tmp_path / "prepared" / "labels.csv").exists()
     assert (tmp_path / "prepared" / "dataset_metadata.json").exists()
+
+
+def test_mimic_hypotension_adapter_converts_temperature_to_celsius_and_filters_outliers(tmp_path):
+    zip_path = tmp_path / "mimic-mini.zip"
+    stays = pd.DataFrame(
+        [[1, 10, 100, "2100-01-01 00:00:00", "2100-01-02 12:00:00", 1.5]],
+        columns=["subject_id", "hadm_id", "stay_id", "intime", "outtime", "los"],
+    )
+    chart = pd.DataFrame(
+        [
+            [1, 10, 100, 1, "2100-01-01 01:00:00", "2100-01-01 01:05:00", 223761, "98.6", 98.6, "F", 0],
+            [1, 10, 100, 1, "2100-01-01 02:00:00", "2100-01-01 02:05:00", 223762, "37.2", 37.2, "C", 0],
+            [1, 10, 100, 1, "2100-01-01 03:00:00", "2100-01-01 03:05:00", 223761, "234123", 234123.0, "F", 0],
+            [1, 10, 100, 1, "2100-01-01 04:00:00", "2100-01-01 04:05:00", 223762, "-99.9", -99.9, "C", 0],
+            [1, 10, 100, 1, "2100-01-02 01:00:00", "2100-01-02 01:05:00", 220052, "72", 72.0, "mmHg", 0],
+        ],
+        columns=["subject_id", "hadm_id", "stay_id", "caregiver_id", "charttime", "storetime", "itemid", "value", "valuenum", "valueuom", "warning"],
+    )
+    with ZipFile(zip_path, "w") as zf:
+        _write_gz_csv(zf, "mimic-iv-3.1/icu/icustays.csv.gz", stays)
+        _write_gz_csv(zf, "mimic-iv-3.1/icu/chartevents.csv.gz", chart)
+    config = MIMICHypotensionConfig(
+        mimic_path=zip_path,
+        variable_itemids={"temperature": [223761, 223762]},
+        outcome_itemids=[220052],
+        cache_dir=tmp_path / "cache",
+    )
+
+    prepared = MIMICIVHypotensionAdapter(config).prepare()
+
+    temperatures = prepared.records.loc[prepared.records["variable"] == "temperature", "value"].round(1).tolist()
+    assert temperatures == [37.0, 37.2]

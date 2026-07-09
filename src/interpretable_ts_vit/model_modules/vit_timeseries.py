@@ -33,21 +33,24 @@ class ViTTimeSeriesModule:
         data.load()
         return _load_evaluate_and_save(self._config(data), self.run_dir, split)
 
-    def explain(self, data: BaseDataModule, split: str = "test", show_progress: bool = True) -> Path:
+    def explain(self, data: BaseDataModule, split: str = "test", show_progress: bool = True, batch_size: int | None = None) -> Path:
         """Generate explanation maps for a saved model and split."""
         data.load()
-        _explain_and_save(self._config(data), self.run_dir, split, show_progress=show_progress)
+        config = self._config(data)
+        if batch_size is not None:
+            config.explain.batch_size = batch_size
+        _explain_and_save(config, self.run_dir, split, show_progress=show_progress)
         return self.explanations_dir(split)
 
     def cluster_explanations(self, data: BaseDataModule | None = None, split: str = "test") -> Path:
-        """Cluster saved explanation maps, optionally split by predicted class."""
+        """Cluster patients with autoencoder embeddings from explanation/value maps."""
         _cluster_and_save(self._config(data), self.run_dir, split)
         return self.clusters_dir(split)
 
-    def cluster_embeddings(self, data: BaseDataModule | None = None, split: str = "test") -> Path:
-        """Cluster patients by trained ViT CLS embeddings."""
+    def cluster_autoencoder(self, data: BaseDataModule | None = None, split: str = "test") -> Path:
+        """Cluster patients by autoencoded explanation/value maps."""
         config = self._config(data)
-        config.cluster.feature_mode = "vit_embedding"
+        config.cluster.feature_mode = "autoencoder"
         _cluster_and_save(config, self.run_dir, split)
         return self.clusters_dir(split)
 

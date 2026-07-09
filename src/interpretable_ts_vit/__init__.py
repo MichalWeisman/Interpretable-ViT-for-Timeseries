@@ -9,14 +9,25 @@ from .binning import TimeSeriesBinner
 
 
 def __getattr__(name):
-    if name == "cluster_explanations":
-        from .clustering import cluster_explanations
+    if name in {
+        "cluster_autoencoder_embeddings",
+        "cluster_explanation_value_autoencoder",
+        "create_explanation_value_embeddings",
+        "train_explanation_value_autoencoder",
+    }:
+        from .autoencoder import (
+            cluster_autoencoder_embeddings,
+            cluster_explanation_value_autoencoder,
+            create_explanation_value_embeddings,
+            train_explanation_value_autoencoder,
+        )
 
-        return cluster_explanations
-    if name == "cluster_embeddings":
-        from .clustering import cluster_embeddings
-
-        return cluster_embeddings
+        return {
+            "cluster_autoencoder_embeddings": cluster_autoencoder_embeddings,
+            "cluster_explanation_value_autoencoder": cluster_explanation_value_autoencoder,
+            "create_explanation_value_embeddings": create_explanation_value_embeddings,
+            "train_explanation_value_autoencoder": train_explanation_value_autoencoder,
+        }[name]
     if name == "explain_model":
         from .explain import explain_model
 
@@ -108,8 +119,9 @@ __all__ = [
     "ViTConfig",
     "ViTTimeSeriesClassifier",
     "aggregate_cluster_value_matrices",
-    "cluster_explanations",
-    "cluster_embeddings",
+    "cluster_autoencoder_embeddings",
+    "cluster_explanation_value_autoencoder",
+    "create_explanation_value_embeddings",
     "explain_model",
     "filter_value_matrix_by_explanation",
     "load_config",
@@ -129,6 +141,7 @@ __all__ = [
     "plot_value_heatmap",
     "run_pipeline",
     "select_patient_ids",
+    "train_explanation_value_autoencoder",
     "train_model",
     "BaseDataModule",
     "GenericCSVDataModule",

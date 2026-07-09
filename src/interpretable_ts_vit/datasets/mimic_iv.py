@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import logging
 import shutil
 import time
 from dataclasses import asdict, dataclass, field
@@ -21,6 +22,9 @@ import numpy as np
 import pandas as pd
 
 from .base import DatasetAdapter, PreparedDataset, register_dataset_adapter
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_VARIABLE_ITEMIDS: dict[str, list[int]] = {
@@ -35,6 +39,9 @@ DEFAULT_VARIABLE_ITEMIDS: dict[str, list[int]] = {
     "lactate": [225668],
     "creatinine": [220615],
 }
+
+TEMPERATURE_FAHRENHEIT_ITEMIDS = {223761}
+TEMPERATURE_CELSIUS_ITEMIDS = {223762}
 
 
 @dataclass
@@ -54,7 +61,7 @@ class MIMICHypotensionConfig:
     variable_itemids: dict[str, list[int]] = field(default_factory=lambda: dict(DEFAULT_VARIABLE_ITEMIDS))
     outcome_itemids: list[int] = field(default_factory=lambda: [220052, 220181])
     chunk_size: int = 1_000_000
-    cache_dir: str | Path | None = "data/mimic_cache"
+    cache_dir: str | Path | None = "data/hypotension/mimic_cache"
     use_extracted_files: bool = True
     use_filtered_cache: bool = True
     progress_interval_chunks: int = 1
@@ -63,6 +70,8 @@ class MIMICHypotensionConfig:
     require_full_prediction_window: bool = True
     require_outcome_measurement: bool = True
     relative_time_anchor: str = "2000-01-01 00:00:00"
+    temperature_celsius_min: float = 25.0
+    temperature_celsius_max: float = 45.0
 
 
 class MIMICIVHypotensionAdapter(DatasetAdapter):
@@ -84,7 +93,15 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
 
     def prepare(self) -> PreparedDataset:
         """Build generic time-series records and binary hypotension labels."""
+        logger.info(
+            "Preparing MIMIC-IV hypotension dataset from %s: observation_hours=%s, prediction_hours=%s, threshold=%s",
+            self.config.mimic_path,
+            self.config.observation_hours,
+            self.config.prediction_hours,
+            self.config.hypotension_threshold,
+        )
         cohort = self._load_cohort()
+        logger.info("Loaded eligible ICU cohort: stays=%d", len(cohort))
         item_to_variable = {
             itemid: variable
             for variable, itemids in self.config.variable_itemids.items()
@@ -96,6 +113,7 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
 
         for chunk in self._iter_filtered_chartevents(cohort, desired_itemids):
             chunk = self._attach_cohort_times(chunk, cohort)
+            logger.info("Processing filtered chartevents chunk: rows=%d", len(chunk))
 
             observed = chunk[
                 (chunk["charttime"] >= chunk["intime"])
@@ -105,9 +123,12 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
             if not observed.empty:
                 observed["patient_id"] = observed["stay_id"].astype(str)
                 observed["variable"] = observed["itemid"].map(item_to_variable)
-                observed["value"] = observed["valuenum"].astype(float)
+                observed["value"] = self._standardize_observed_values(observed)
+                before_drop = len(observed)
+                observed = observed.dropna(subset=["value"])
                 observed["timestamp"] = self._relative_timestamp(observed["charttime"], observed["intime"])
                 records_parts.append(observed[["patient_id", "variable", "value", "timestamp"]])
+                logger.info("Collected observed records from chunk: rows=%d, dropped_invalid_values=%d", len(observed), before_drop - len(observed))
 
             outcome = chunk[
                 (chunk["charttime"] >= chunk["observation_end"])
@@ -116,26 +137,47 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
             ].copy()
             if not outcome.empty:
                 outcome_parts.append(outcome[["stay_id", "valuenum"]])
+                logger.info("Collected outcome measurements from chunk: rows=%d", len(outcome))
 
         records = self._finalize_records(records_parts)
         labels = self._build_labels(cohort, records, outcome_parts)
         records = records[records["patient_id"].isin(set(labels["patient_id"]))].reset_index(drop=True)
         metadata = self._metadata(cohort, records, labels)
+        logger.info(
+            "Prepared MIMIC-IV hypotension dataset: records=%d, labeled_stays=%d, label_counts=%s",
+            len(records),
+            len(labels),
+            metadata.get("label_counts", {}),
+        )
         return PreparedDataset(records=records, labels=labels, metadata=metadata)
+
+    def _standardize_observed_values(self, observed: pd.DataFrame) -> pd.Series:
+        """Return model values after unit conversion and source-specific filtering."""
+        values = observed["valuenum"].astype(float).copy()
+        is_temperature = observed["variable"] == "temperature"
+        if is_temperature.any():
+            values.loc[is_temperature] = standardize_temperature_to_celsius(
+                values.loc[is_temperature],
+                itemids=observed.loc[is_temperature, "itemid"],
+                celsius_min=self.config.temperature_celsius_min,
+                celsius_max=self.config.temperature_celsius_max,
+            )
+        return values
 
     def _iter_filtered_chartevents(self, cohort: pd.DataFrame, desired_itemids: list[int]) -> Iterator[pd.DataFrame]:
         """Yield chart events already filtered to eligible stays and variables."""
         cache_path = self._filtered_cache_path(cohort, desired_itemids)
         if cache_path is not None and self.config.use_filtered_cache and cache_path.exists():
-            print(f"Loading filtered chartevents cache: {cache_path}", flush=True)
+            logger.info("Loading filtered chartevents cache from %s", cache_path)
             try:
                 cached = pd.read_parquet(cache_path)
                 if not cached.empty:
                     cached["charttime"] = pd.to_datetime(cached["charttime"])
+                logger.info("Loaded filtered chartevents cache from %s: rows=%d", cache_path, len(cached))
                 yield cached
                 return
             except (ImportError, ValueError, OSError) as exc:
-                print(f"Could not read filtered cache; rescanning raw chartevents. Reason: {exc}", flush=True)
+                logger.warning("Could not read filtered cache from %s; rescanning raw chartevents. Reason: %s", cache_path, exc)
 
         start = time.perf_counter()
         scanned_rows = 0
@@ -143,6 +185,12 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
         filtered_parts: list[pd.DataFrame] = []
         stay_ids = set(cohort.index)
         desired = set(desired_itemids)
+        logger.info(
+            "Scanning raw chartevents: desired_itemids=%d, eligible_stays=%d, chunk_size=%d",
+            len(desired),
+            len(stay_ids),
+            self.config.chunk_size,
+        )
         for index, chunk in enumerate(
             self.source.iter_table(
                 "icu/chartevents.csv.gz",
@@ -174,12 +222,14 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
             filtered_events["charttime"] = pd.to_datetime(filtered_events["charttime"])
         read_bytes, total_bytes = self.source.progress("icu/chartevents.csv.gz")
         if total_bytes and read_bytes is not None:
-            print(flush=True)
+            logger.info("Finished reading compressed chartevents bytes: read=%d total=%d", read_bytes, total_bytes)
         if cache_path is not None and self.config.use_filtered_cache:
             self._write_filtered_cache(filtered_events, cache_path)
-        print(
-            f"Finished scanning chartevents: scanned={scanned_rows:,}, kept={kept_rows:,}, elapsed={time.perf_counter() - start:.1f}s",
-            flush=True,
+        logger.info(
+            "Finished scanning chartevents: scanned=%d, kept=%d, elapsed=%.1fs",
+            scanned_rows,
+            kept_rows,
+            time.perf_counter() - start,
         )
         yield filtered_events
 
@@ -207,9 +257,9 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             frame.to_parquet(path, index=False)
-            print(f"Wrote filtered chartevents cache: {path}", flush=True)
+            logger.info("Wrote filtered chartevents cache to %s: rows=%d", path, len(frame))
         except ImportError as exc:
-            print(f"Skipping Parquet cache because a Parquet engine is not installed: {exc}", flush=True)
+            logger.warning("Skipping Parquet cache because a Parquet engine is not installed: %s", exc)
 
     def _log_progress(self, chunk_index: int, scanned_rows: int, kept_rows: int, start: float) -> None:
         interval = self.config.progress_interval_chunks
@@ -222,25 +272,26 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
             eta = elapsed * (1.0 / fraction - 1.0) if fraction > 0 else None
             bar = _progress_bar(fraction)
             eta_text = _format_duration(eta) if eta is not None else "?"
-            print(
-                "\r"
-                f"chartevents {bar} {fraction * 100:5.1f}% "
-                f"| chunks={chunk_index:,} scanned={scanned_rows:,} kept={kept_rows:,} "
-                f"| elapsed={_format_duration(elapsed)} eta={eta_text}",
-                end="",
-                flush=True,
+            logger.info(
+                "chartevents %s %.1f%% | chunks=%d scanned=%d kept=%d | elapsed=%s eta=%s",
+                bar,
+                fraction * 100,
+                chunk_index,
+                scanned_rows,
+                kept_rows,
+                _format_duration(elapsed),
+                eta_text,
             )
             return
-        print(
-            f"chartevents chunks={chunk_index:,}, scanned={scanned_rows:,}, kept={kept_rows:,}, elapsed={elapsed:.1f}s",
-            flush=True,
-        )
+        logger.info("chartevents chunks=%d, scanned=%d, kept=%d, elapsed=%.1fs", chunk_index, scanned_rows, kept_rows, elapsed)
 
     def _load_cohort(self) -> pd.DataFrame:
+        logger.info("Loading ICU stays table")
         stays = self.source.read_table(
             "icu/icustays.csv.gz",
             usecols=["subject_id", "hadm_id", "stay_id", "intime", "outtime", "los"],
         )
+        logger.info("Loaded ICU stays table: rows=%d", len(stays))
         stays["intime"] = pd.to_datetime(stays["intime"])
         stays["outtime"] = pd.to_datetime(stays["outtime"])
         stays["observation_end"] = stays["intime"] + pd.to_timedelta(self.config.observation_hours, unit="h")
@@ -253,6 +304,8 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
         stays = stays.sort_values("stay_id")
         if self.config.max_stays is not None:
             stays = stays.head(self.config.max_stays)
+            logger.info("Limited cohort to max_stays=%d", self.config.max_stays)
+        logger.info("Prepared ICU cohort after window filters: rows=%d", len(stays))
         return stays.set_index("stay_id")
 
     def _relative_timestamp(self, charttime: pd.Series, intime: pd.Series) -> pd.Series:
@@ -262,8 +315,10 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
 
     def _finalize_records(self, records_parts: list[pd.DataFrame]) -> pd.DataFrame:
         if not records_parts:
+            logger.warning("No observed records were collected")
             return pd.DataFrame(columns=["patient_id", "variable", "value", "timestamp"])
         records = pd.concat(records_parts, ignore_index=True)
+        logger.info("Finalizing observed records: parts=%d, rows=%d", len(records_parts), len(records))
         return records.sort_values(["patient_id", "timestamp", "variable"]).reset_index(drop=True)
 
     def _build_labels(
@@ -274,6 +329,7 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
     ) -> pd.DataFrame:
         observed_counts = records.groupby("patient_id").size() if not records.empty else pd.Series(dtype=int)
         eligible_ids = set(observed_counts[observed_counts >= self.config.min_observations].index)
+        logger.info("Building labels: patients_with_min_observations=%d, min_observations=%d", len(eligible_ids), self.config.min_observations)
         if outcome_parts:
             outcomes = pd.concat(outcome_parts, ignore_index=True)
             outcome_summary = outcomes.groupby("stay_id")["valuenum"].agg(
@@ -282,6 +338,7 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
             )
         else:
             outcome_summary = pd.DataFrame(columns=["any_hypotension", "n_outcome_measurements"])
+        logger.info("Outcome summary rows=%d from parts=%d", len(outcome_summary), len(outcome_parts))
         rows = []
         for stay_id in cohort.index:
             patient_id = str(stay_id)
@@ -294,7 +351,9 @@ class MIMICIVHypotensionAdapter(DatasetAdapter):
             else:
                 label = "true" if bool(outcome_summary.loc[stay_id, "any_hypotension"]) else "false"
             rows.append({"patient_id": patient_id, "label": label})
-        return pd.DataFrame(rows, columns=["patient_id", "label"])
+        labels = pd.DataFrame(rows, columns=["patient_id", "label"])
+        logger.info("Built labels: rows=%d, counts=%s", len(labels), labels["label"].value_counts().to_dict() if not labels.empty else {})
+        return labels
 
     def _metadata(self, cohort: pd.DataFrame, records: pd.DataFrame, labels: pd.DataFrame) -> dict[str, object]:
         return _jsonable({
@@ -322,15 +381,23 @@ class _MIMICSource:
         self._progress: dict[str, tuple[int | None, int | None]] = {}
 
     def read_table(self, table: str, usecols: list[str] | None = None) -> pd.DataFrame:
+        logger.info("Reading MIMIC table %s", table)
         if self.is_zip:
             extracted = self._extract_table(table)
             if extracted is not None:
-                return pd.read_csv(extracted, usecols=usecols)
+                frame = pd.read_csv(extracted, usecols=usecols)
+                logger.info("Read MIMIC table %s from extracted file %s: rows=%d", table, extracted, len(frame))
+                return frame
             with ZipFile(self.path) as zf:
                 entry = self._zip_entry(zf, table)
                 with gzip.GzipFile(fileobj=zf.open(entry)) as fh:
-                    return pd.read_csv(fh, usecols=usecols)
-        return pd.read_csv(self._file_path(table), usecols=usecols)
+                    frame = pd.read_csv(fh, usecols=usecols)
+                    logger.info("Read MIMIC table %s from zip entry %s: rows=%d", table, entry, len(frame))
+                    return frame
+        path = self._file_path(table)
+        frame = pd.read_csv(path, usecols=usecols)
+        logger.info("Read MIMIC table %s from %s: rows=%d", table, path, len(frame))
+        return frame
 
     def iter_table(
         self,
@@ -338,6 +405,7 @@ class _MIMICSource:
         usecols: list[str] | None,
         chunksize: int,
     ) -> Iterator[pd.DataFrame]:
+        logger.info("Iterating MIMIC table %s with chunksize=%d", table, chunksize)
         if self.is_zip:
             extracted = self._extract_table(table)
             if extracted is not None:
@@ -368,6 +436,7 @@ class _MIMICSource:
         chunksize: int,
     ) -> Iterator[pd.DataFrame]:
         total = path.stat().st_size
+        logger.info("Reading compressed MIMIC table %s from %s: bytes=%d", table, path, total)
         with path.open("rb") as raw_file:
             raw = _TrackingReader(raw_file, table, total, self._progress)
             with gzip.GzipFile(fileobj=raw) as fh:
@@ -378,13 +447,15 @@ class _MIMICSource:
             return None
         output = self.extraction_dir / table
         if output.exists():
+            logger.info("Using extracted MIMIC table %s at %s", table, output)
             return output
         output.parent.mkdir(parents=True, exist_ok=True)
         with ZipFile(self.path) as zf:
             entry = self._zip_entry(zf, table)
-            print(f"Extracting {entry} to {output}", flush=True)
+            logger.info("Extracting MIMIC zip entry %s to %s", entry, output)
             with zf.open(entry) as source, output.open("wb") as target:
                 shutil.copyfileobj(source, target)
+        logger.info("Extracted MIMIC zip entry %s to %s", table, output)
         return output
 
     def _zip_entry(self, zf: ZipFile, table: str) -> str:
@@ -462,3 +533,30 @@ def _format_duration(seconds: float | None) -> str:
 
 
 register_dataset_adapter(MIMICIVHypotensionAdapter.name, MIMICIVHypotensionAdapter)
+
+
+def standardize_temperature_to_celsius(
+    values: pd.Series,
+    itemids: pd.Series | None = None,
+    celsius_min: float = 25.0,
+    celsius_max: float = 45.0,
+) -> pd.Series:
+    """Convert MIMIC temperature values to Celsius and remove implausible values.
+
+    When `itemids` are available, MIMIC item 223761 is converted from
+    Fahrenheit and item 223762 is treated as Celsius. For already prepared
+    records that no longer include item ids, values at or above 70 are treated
+    as Fahrenheit; values below 70 are treated as Celsius before range checks.
+    """
+    standardized = values.astype(float).copy()
+    if itemids is None:
+        fahrenheit = standardized >= 70.0
+    else:
+        itemids = itemids.astype("int64")
+        fahrenheit = itemids.isin(TEMPERATURE_FAHRENHEIT_ITEMIDS)
+        known_temperature = itemids.isin(TEMPERATURE_FAHRENHEIT_ITEMIDS | TEMPERATURE_CELSIUS_ITEMIDS)
+        standardized.loc[~known_temperature] = np.nan
+    standardized.loc[fahrenheit] = (standardized.loc[fahrenheit] - 32.0) * 5.0 / 9.0
+    plausible = standardized.between(celsius_min, celsius_max, inclusive="both")
+    standardized.loc[~plausible] = np.nan
+    return standardized

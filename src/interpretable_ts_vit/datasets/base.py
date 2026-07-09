@@ -5,10 +5,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,10 +32,17 @@ class PreparedDataset:
         """Write records, labels, and metadata files to `output_dir`."""
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Saving prepared dataset to %s: records=%d, labels=%d",
+            output,
+            len(self.records),
+            len(self.labels),
+        )
         self.records.to_csv(output / "records.csv", index=False)
         self.labels.to_csv(output / "labels.csv", index=False)
         with (output / "dataset_metadata.json").open("w", encoding="utf-8") as fh:
             json.dump(self.metadata, fh, indent=2)
+        logger.info("Saved prepared dataset to %s", output)
 
 
 class DatasetAdapter(ABC):

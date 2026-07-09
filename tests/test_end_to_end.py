@@ -1,8 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from interpretable_ts_vit import TimeSeriesBinner, ViTConfig, ViTTimeSeriesClassifier, cluster_explanations, explain_model
+from interpretable_ts_vit import TimeSeriesBinner, ViTConfig, ViTTimeSeriesClassifier, explain_model
+from interpretable_ts_vit.autoencoder import cluster_explanation_value_autoencoder
 from interpretable_ts_vit.data import BinnedTimeSeriesDataset
+from interpretable_ts_vit.pipeline import _denormalized_patient_value_maps
 from interpretable_ts_vit.training import train_model
 from interpretable_ts_vit.visualization import aggregate_cluster_value_matrices, plot_value_heatmap
 
@@ -26,7 +28,21 @@ def test_end_to_end_smoke(tmp_path):
     )
     train_model(model, ds, ds, config=type("Cfg", (), {"device": "cpu", "batch_size": 5, "epochs": 1, "learning_rate": 1e-3, "weight_decay": 0.0})())
     explanations = explain_model(model, ds, output_dir=tmp_path / "explanations", device="cpu")
-    clustered = cluster_explanations(explanations, n_clusters=2, output_dir=tmp_path / "clusters")
+    values = _denormalized_patient_value_maps(ds, binner)
+    clustered = cluster_explanation_value_autoencoder(
+        explanations,
+        values,
+        validation_explanations=explanations,
+        validation_values=values,
+        cluster_explanations=explanations,
+        cluster_values=values,
+        n_clusters=2,
+        output_dir=tmp_path / "clusters",
+        latent_dim=2,
+        epochs=1,
+        batch_size=5,
+        device="cpu",
+    )
     value_matrices = aggregate_cluster_value_matrices(ds, clustered["assignments"], binner, output_dir=tmp_path / "cluster_values")
     for cluster, matrix in value_matrices.items():
         plot_value_heatmap(matrix, binner.variable_vocab_, binner.time_bins_, tmp_path / f"cluster_{cluster}.png")
