@@ -83,12 +83,30 @@ def __getattr__(name):
             "plot_value_heatmap": plot_value_heatmap,
             "select_patient_ids": select_patient_ids,
         }[name]
-    if name in {"MIMICIVHypotensionAdapter", "MIMICHypotensionConfig"}:
-        from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
+    if name in {
+        "MIMICIVHypotensionAdapter",
+        "MIMICIVMultiTargetAdapter",
+        "MIMICHypotensionConfig",
+        "MIMICTargetsConfig",
+        "MIMICTargetWindowConfig",
+        "load_mimic_targets_config",
+    }:
+        from .datasets import (
+            MIMICIVHypotensionAdapter,
+            MIMICIVMultiTargetAdapter,
+            MIMICHypotensionConfig,
+            MIMICTargetsConfig,
+            MIMICTargetWindowConfig,
+            load_mimic_targets_config,
+        )
 
         return {
             "MIMICIVHypotensionAdapter": MIMICIVHypotensionAdapter,
+            "MIMICIVMultiTargetAdapter": MIMICIVMultiTargetAdapter,
             "MIMICHypotensionConfig": MIMICHypotensionConfig,
+            "MIMICTargetsConfig": MIMICTargetsConfig,
+            "MIMICTargetWindowConfig": MIMICTargetWindowConfig,
+            "load_mimic_targets_config": load_mimic_targets_config,
         }[name]
     if name in {"PipelinePaths", "PipelineResult", "PipelineRunConfig", "run_pipeline"}:
         from .pipeline import PipelinePaths, PipelineResult, PipelineRunConfig, run_pipeline
@@ -128,7 +146,11 @@ __all__ = [
     "load_patient_explanation_matrix",
     "load_normal_ranges",
     "MIMICIVHypotensionAdapter",
+    "MIMICIVMultiTargetAdapter",
     "MIMICHypotensionConfig",
+    "MIMICTargetsConfig",
+    "MIMICTargetWindowConfig",
+    "load_mimic_targets_config",
     "normal_range_status_matrix",
     "patient_class_frame",
     "patient_value_matrix",

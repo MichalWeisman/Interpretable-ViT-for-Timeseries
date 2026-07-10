@@ -1,0 +1,33 @@
+mimic_path: mimic-iv-3.1.zip
+output_dir: data/mimic_targets
+cache_dir: data/mimic_targets/cache
+chunk_size: 1000000
+use_extracted_files: true
+use_filtered_cache: true
+require_full_window: true
+min_observations: 1
+
+windows:
+  - name: obs48_target24_gap0
+    observation_hours: 48
+    prediction_hours: 24
+    gap_hours: 0
+  - name: obs48_target24_gap8
+    observation_hours: 48
+    prediction_hours: 24
+    gap_hours: 8
+
+targets:
+  - cardiovascular_event
+  - nosocomial_infection
+  - hypoglycemia
+  - prolonged_hyperglycemia
+  - in_hospital_mortality
+
+# Optional exact itemid overrides can be added here after inspecting local
+# MIMIC dictionaries. Regex defaults in the adapter cover common labels.
+lab_itemids: {}
+
+hyperglycemia_threshold: 180
+troponin_i_threshold: 0.12
+hypoglycemia_threshold: 70

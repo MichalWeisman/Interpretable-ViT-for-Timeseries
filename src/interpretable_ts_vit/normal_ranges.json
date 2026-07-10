@@ -5,6 +5,12 @@
     "unit": "beats/min",
     "note": "Generic adult resting reference range; edit for cohort-specific use."
   },
+  "blood_glucose": {
+    "low": 70,
+    "high": 140,
+    "unit": "mg/dL",
+    "note": "Generic random glucose plotting range."
+  },
   "systolic_bp": {
     "low": 90,
     "high": 120,
@@ -58,5 +64,161 @@
     "high": 1.3,
     "unit": "mg/dL",
     "note": "Generic adult serum creatinine plotting range."
+  },
+  "albumin": {
+    "low": 3.5,
+    "high": 5.0,
+    "unit": "g/dL",
+    "note": "Generic adult serum albumin range."
+  },
+  "wbc": {
+    "low": 4500,
+    "high": 11000,
+    "unit": "cells/uL",
+    "note": "Generic white blood cell count range."
+  },
+  "ldh": {
+    "low": 140,
+    "high": 280,
+    "unit": "U/L",
+    "note": "Generic LDH plotting range; laboratory references vary."
+  },
+  "neutrophils": {
+    "low": 1500,
+    "high": 8000,
+    "unit": "cells/uL",
+    "note": "Generic absolute neutrophil count range."
+  },
+  "troponin_i": {
+    "low": 0,
+    "high": 0.04,
+    "unit": "ng/mL",
+    "note": "Generic plotting range; cardiovascular target threshold defaults to 0.12 ng/mL."
+  },
+  "blood_ph": {
+    "low": 7.35,
+    "high": 7.45,
+    "unit": "pH",
+    "note": "Generic arterial/venous blood pH reference range."
+  },
+  "bicarbonate": {
+    "low": 22,
+    "high": 28,
+    "unit": "mEq/L",
+    "note": "Generic serum bicarbonate range."
+  },
+  "blood_culture": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Binary/count event indicator."
+  },
+  "urine_culture": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Binary/count event indicator."
+  },
+  "antibiotics": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
+  },
+  "dextrose_5": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication/input exposure event indicator."
+  },
+  "dextrose_10": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication/input exposure event indicator."
+  },
+  "insulin_rapid_acting": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Insulin exposure event indicator."
+  },
+  "insulin_short_acting": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Insulin exposure event indicator."
+  },
+  "insulin_intermediate_acting": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Insulin exposure event indicator."
+  },
+  "insulin_long_acting": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Insulin exposure event indicator."
+  },
+  "insulin_ultra_long_acting": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Insulin exposure event indicator."
+  },
+  "insulin_premixed": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Insulin exposure event indicator."
+  },
+  "metformin": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
+  },
+  "meglitinides": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
+  },
+  "glp1_agonists": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
+  },
+  "sulfonylurea": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
+  },
+  "dpp4_inhibitors_with_metformin": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
+  },
+  "dpp4_inhibitors": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
+  },
+  "alpha_glucosidase_inhibitors": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
+  },
+  "furosemide": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication exposure event indicator."
   }
 }

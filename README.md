@@ -25,6 +25,7 @@ The binner converts each patient into a two-channel tensor `[2, variables, times
 
 ```powershell
 tsvit prepare-mimic-hypotension --mimic-path mimic-iv-3.1.zip --out data/hypotension/mimic_hypotension
+tsvit prepare-mimic-targets --config configs/mimic_targets.yaml
 tsvit prepare-data --records records.csv --labels labels.csv --out data/hypotension/processed --config config.yaml
 tsvit train --data data/hypotension/processed --out runs/example --config config.yaml
 tsvit explain --run runs/example --split test
@@ -198,6 +199,54 @@ tsvit prepare-data --records data/hypotension/mimic_hypotension/records.csv --la
 
 To add another dataset, implement `DatasetAdapter.prepare()` and return a
 `PreparedDataset` with the same generic records/labels schema.
+
+## MIMIC-IV Multi-Target Dataset Creation
+
+Use the config-driven endpoint to create one pre-tensor dataset per prediction
+target and window configuration from the zipped MIMIC-IV archive:
+
+```powershell
+tsvit prepare-mimic-targets --config configs/mimic_targets.yaml
+```
+
+The default config creates two window variants:
+
+- `obs48_target24_gap0`: 48-hour observation, 24-hour prediction, no gap
+- `obs48_target24_gap8`: 48-hour observation, 24-hour prediction, 8-hour gap
+
+For each window it writes target-specific folders under `data/mimic_targets/`,
+for example:
+
+```text
+data/mimic_targets/obs48_target24_gap0/hypoglycemia/
+  records.csv
+  labels.csv
+  dataset_metadata.json
+```
+
+These are source CSVs only, not tensors. Run `tsvit prepare-data` separately
+when you want to bin one of the generated target datasets.
+
+The current targets are:
+
+- `cardiovascular_event`
+- `nosocomial_infection`
+- `hypoglycemia`
+- `prolonged_hyperglycemia`
+- `in_hospital_mortality`
+
+Each row in `labels.csv` corresponds to a hospital admission (`hadm_id`).
+Timestamps are relative to hospital admission and anchored at
+`2000-01-01 00:00:00`. The adapter uses filtered Parquet caches under the
+configured `cache_dir` so repeated runs with new windows or targets do not need
+to rescan every raw MIMIC table from the zip.
+
+Use `notebooks/mimic_targets/mimic_general_item_exploration.ipynb` to inspect
+the selected lab/chart/input item mappings before reading patient-level event
+tables. After generating datasets, use
+`notebooks/mimic_targets/mimic_target_dataset_exploration.ipynb` to inspect
+label balance, variable coverage, value distributions, event timing, and
+positive/negative summaries.
 
 ## One-File Endpoint
 

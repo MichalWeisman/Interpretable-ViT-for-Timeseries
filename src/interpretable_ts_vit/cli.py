@@ -17,7 +17,7 @@ from .autoencoder import cluster_autoencoder_embeddings, create_explanation_valu
 from .binning import TimeSeriesBinner
 from .config import load_config
 from .data import BinnedTimeSeriesDataset
-from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
+from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig, MIMICIVMultiTargetAdapter, load_mimic_targets_config
 from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
@@ -55,6 +55,10 @@ def main(argv: list[str] | None = None) -> None:
     mimic.add_argument("--min-observations", type=int, default=1)
     mimic.add_argument("--allow-short-prediction-window", action="store_true")
     mimic.add_argument("--allow-missing-outcome-measurement", action="store_true")
+
+    mimic_targets = sub.add_parser("prepare-mimic-targets")
+    mimic_targets.add_argument("--config", required=True, help="YAML/JSON multi-target MIMIC data-creation config.")
+    mimic_targets.add_argument("--out", help="Optional output directory override.")
 
     train = sub.add_parser("train")
     train.add_argument("--data", required=True)
@@ -98,6 +102,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_prepare_data(args)
     elif args.command == "prepare-mimic-hypotension":
         cmd_prepare_mimic_hypotension(args)
+    elif args.command == "prepare-mimic-targets":
+        cmd_prepare_mimic_targets(args)
     elif args.command == "train":
         cmd_train(args)
     elif args.command == "explain":
@@ -172,6 +178,16 @@ def cmd_prepare_mimic_hypotension(args) -> None:
     prepared = MIMICIVHypotensionAdapter(config).prepare()
     prepared.save(args.out)
     logger.info("Finished preparing MIMIC-IV hypotension CSV files into %s", args.out)
+
+
+def cmd_prepare_mimic_targets(args) -> None:
+    """Create records/labels files for configured MIMIC-IV prediction targets."""
+    config = load_mimic_targets_config(args.config)
+    output_dir = args.out or config.output_dir
+    logger.info("Preparing MIMIC-IV target datasets from config=%s into %s", args.config, output_dir)
+    outputs = MIMICIVMultiTargetAdapter(config).save_all(output_dir)
+    for (window_name, target), path in sorted(outputs.items()):
+        logger.info("Prepared %s/%s at %s", window_name, target, path)
 
 
 def cmd_train(args) -> None:
