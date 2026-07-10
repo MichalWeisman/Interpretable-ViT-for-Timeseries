@@ -267,6 +267,7 @@ def _cluster_and_save(config: Config, run_dir: str | Path, split: str) -> None:
         batch_size=config.cluster.autoencoder_batch_size,
         device=config.train.device,
         early_stopping_patience=config.cluster.autoencoder_early_stopping_patience,
+        patch_size=config.model.patch_size,
     )
     embedded = create_explanation_value_embeddings(
         run_dir / "explanations" / split,

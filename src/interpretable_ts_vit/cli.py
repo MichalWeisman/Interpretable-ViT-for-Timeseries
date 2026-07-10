@@ -269,6 +269,7 @@ def cmd_cluster(args) -> None:
         batch_size=config.autoencoder_batch_size,
         device=full_config.train.device,
         early_stopping_patience=config.autoencoder_early_stopping_patience,
+        patch_size=full_config.model.patch_size,
     )
     embedded = create_explanation_value_embeddings(
         explanation_dir,

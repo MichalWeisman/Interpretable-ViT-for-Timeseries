@@ -146,6 +146,7 @@ def cluster_explanation_value_autoencoder(
     device: str = "auto",
     early_stopping_patience: int | None = 10,
     show_progress: bool = False,
+    patch_size: tuple[int, int] = (1, 4),
     hdbscan_min_cluster_size: int | None = None,
     hdbscan_min_samples: int | None = None,
 ) -> dict[str, object]:
@@ -155,7 +156,8 @@ def cluster_explanation_value_autoencoder(
     underlying stages are exposed as separate public functions.
     """
     out = Path(output_dir) if output_dir is not None else None
-    cached = _load_cached_outputs(out)
+    patch_size = _normalize_patch_size(patch_size)
+    cached = _load_cached_outputs(out, expected_patch_size=patch_size)
     if cached is not None:
         return cached
 
@@ -172,6 +174,7 @@ def cluster_explanation_value_autoencoder(
         device=device,
         early_stopping_patience=early_stopping_patience,
         show_progress=show_progress,
+        patch_size=patch_size,
     )
     embedded = create_explanation_value_embeddings(
         cluster_explanations if cluster_explanations is not None else explanations,
@@ -219,10 +222,12 @@ def train_explanation_value_autoencoder(
     device: str = "auto",
     early_stopping_patience: int | None = 10,
     show_progress: bool = False,
+    patch_size: tuple[int, int] = (1, 4),
 ) -> dict[str, object]:
     """Train the autoencoder on train maps and optionally validate it."""
     out = Path(output_dir) if output_dir is not None else None
-    cached = _load_cached_autoencoder(out, device=device)
+    patch_size = _normalize_patch_size(patch_size)
+    cached = _load_cached_autoencoder(out, device=device, expected_patch_size=patch_size)
     if cached is not None:
         return cached
 
@@ -250,6 +255,7 @@ def train_explanation_value_autoencoder(
         device=device,
         early_stopping_patience=early_stopping_patience,
         show_progress=show_progress,
+        patch_size=patch_size,
     )
     metrics = {
         "train_loss": _evaluate_autoencoder(model, train_tensors, batch_size=batch_size, device=device),
@@ -267,6 +273,7 @@ def train_explanation_value_autoencoder(
         "train": {"n_patients": len(train_ids), **train_metadata},
         "validation": {"n_patients": len(validation_ids), **validation_metadata},
         "input_shape": list(train_tensors.shape[1:]),
+        "patch_size": list(patch_size),
         "latent_dim": latent_dim,
         "autoencoder_epochs": epochs,
         "autoencoder_learning_rate": learning_rate,
@@ -304,10 +311,6 @@ def create_explanation_value_embeddings(
     """Create latent embeddings for a split using a trained autoencoder."""
     out = Path(output_dir) if output_dir is not None else None
     maps = _load_maps(explanations)
-    cached = _load_cached_embeddings(out)
-    if cached is not None:
-        cached["explanations"] = maps
-        return cached
     if model is None or preprocessor is None:
         artifact_path = Path(autoencoder_path) if autoencoder_path is not None else None
         if artifact_path is None and out is not None:
@@ -315,6 +318,11 @@ def create_explanation_value_embeddings(
         if artifact_path is None:
             raise ValueError("model/preprocessor or autoencoder_path is required to create embeddings.")
         model, preprocessor, _ = _load_autoencoder_artifact(artifact_path, device=device)
+    expected_patch_size = (model.patch_vars, model.patch_steps)
+    cached = _load_cached_embeddings(out, expected_patch_size=expected_patch_size)
+    if cached is not None:
+        cached["explanations"] = maps
+        return cached
 
     patient_ids, raw, metadata = _raw_autoencoder_tensor(maps, values)
     tensors = _transform_tensor(raw, preprocessor)
@@ -328,6 +336,7 @@ def create_explanation_value_embeddings(
             json.dumps(
                 {
                     "autoencoder_architecture": "vit",
+                    "patch_size": [model.patch_vars, model.patch_steps],
                     "cluster": {"n_patients": len(patient_ids), **metadata},
                     "cluster_loss": loss,
                 },
@@ -448,12 +457,17 @@ def _train_autoencoder(
     device: str,
     early_stopping_patience: int | None = 10,
     show_progress: bool = False,
+    patch_size: tuple[int, int] = (1, 4),
 ) -> tuple[MapAutoencoder, list[dict[str, float | int | None]]]:
     resolved_device = resolve_device(device)
     x = torch.as_tensor(tensors, dtype=torch.float32)
     dataset = TensorDataset(x)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    model = MapAutoencoder(input_shape=tuple(int(dim) for dim in tensors.shape[1:]), latent_dim=latent_dim).to(resolved_device)
+    model = MapAutoencoder(
+        input_shape=tuple(int(dim) for dim in tensors.shape[1:]),
+        latent_dim=latent_dim,
+        patch_size=patch_size,
+    ).to(resolved_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
     history: list[dict[str, float | int | None]] = []
@@ -518,6 +532,15 @@ def _best_epoch(history: list[dict[str, float | int | None]]) -> int | None:
         return None
     metric = "val_loss" if history[0].get("val_loss") is not None else "train_loss"
     return int(min(history, key=lambda row: float(row[metric]))["epoch"])
+
+
+def _normalize_patch_size(patch_size: tuple[int, int]) -> tuple[int, int]:
+    if len(patch_size) != 2:
+        raise ValueError("patch_size must contain exactly two dimensions: (variables, timesteps).")
+    patch_vars, patch_steps = (int(dim) for dim in patch_size)
+    if patch_vars <= 0 or patch_steps <= 0:
+        raise ValueError("patch_size dimensions must be positive.")
+    return patch_vars, patch_steps
 
 
 @torch.no_grad()
@@ -594,7 +617,12 @@ def _load_autoencoder_artifact(path: str | Path, *, device: str) -> tuple[MapAut
     return model, preprocessor, latent_dim
 
 
-def _load_cached_autoencoder(output_dir: Path | None, *, device: str) -> dict[str, object] | None:
+def _load_cached_autoencoder(
+    output_dir: Path | None,
+    *,
+    device: str,
+    expected_patch_size: tuple[int, int] | None = None,
+) -> dict[str, object] | None:
     if output_dir is None:
         return None
     model_path = output_dir / "autoencoder.pt"
@@ -606,6 +634,8 @@ def _load_cached_autoencoder(output_dir: Path | None, *, device: str) -> dict[st
         model, preprocessor, _ = _load_autoencoder_artifact(model_path, device=device)
     except ValueError:
         return None
+    if expected_patch_size is not None and (model.patch_vars, model.patch_steps) != expected_patch_size:
+        return None
     return {
         "model": model,
         "preprocessor": preprocessor,
@@ -615,7 +645,11 @@ def _load_cached_autoencoder(output_dir: Path | None, *, device: str) -> dict[st
     }
 
 
-def _load_cached_embeddings(output_dir: Path | None) -> dict[str, object] | None:
+def _load_cached_embeddings(
+    output_dir: Path | None,
+    *,
+    expected_patch_size: tuple[int, int] | None = None,
+) -> dict[str, object] | None:
     if output_dir is None:
         return None
     embeddings_path = output_dir / "autoencoder_embeddings.csv"
@@ -630,6 +664,12 @@ def _load_cached_embeddings(output_dir: Path | None) -> dict[str, object] | None
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if metadata.get("autoencoder_architecture") != "vit":
             return None
+        cached_patch_size = metadata.get("patch_size")
+        if expected_patch_size is not None and cached_patch_size is None:
+            return None
+        if expected_patch_size is not None and cached_patch_size is not None:
+            if tuple(int(dim) for dim in cached_patch_size) != expected_patch_size:
+                return None
         loss = metadata.get("cluster_loss")
     else:
         return None
@@ -752,7 +792,11 @@ def _write_outputs(
     _write_explanation_aggregates(output_dir, assignments, explanations)
 
 
-def _load_cached_outputs(output_dir: Path | None) -> dict[str, object] | None:
+def _load_cached_outputs(
+    output_dir: Path | None,
+    *,
+    expected_patch_size: tuple[int, int] | None = None,
+) -> dict[str, object] | None:
     if output_dir is None:
         return None
     required = [
@@ -770,6 +814,12 @@ def _load_cached_outputs(output_dir: Path | None) -> dict[str, object] | None:
         return None
     if checkpoint.get("architecture") != "vit":
         return None
+    if expected_patch_size is not None:
+        cached_patch_size = checkpoint.get("patch_size")
+        if cached_patch_size is None:
+            return None
+        if cached_patch_size is not None and tuple(int(dim) for dim in cached_patch_size) != expected_patch_size:
+            return None
     embeddings_frame = pd.read_csv(output_dir / "autoencoder_embeddings.csv", dtype={"patient_id": str})
     embedding_cols = [col for col in embeddings_frame.columns if col.startswith("embedding_")]
     assignments = pd.read_csv(output_dir / "cluster_assignments.csv", dtype={"patient_id": str})

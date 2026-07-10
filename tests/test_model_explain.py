@@ -217,3 +217,29 @@ def test_autoencoder_reuses_saved_embeddings_and_metrics(tmp_path):
 
     assert first["embeddings"].shape == second["embeddings"].shape
     assert second["loaded_from_cache"] is True
+
+
+def test_autoencoder_uses_requested_patch_size(tmp_path):
+    explanations = {f"p{idx}": np.ones((2, 4), dtype=float) * idx for idx in range(4)}
+    values = {f"p{idx}": np.ones((2, 4), dtype=float) * (70 + idx) for idx in range(4)}
+    out = tmp_path / "autoencoder_clusters"
+
+    clustered = cluster_explanation_value_autoencoder(
+        explanations,
+        values,
+        validation_explanations=explanations,
+        validation_values=values,
+        cluster_explanations=explanations,
+        cluster_values=values,
+        n_clusters=2,
+        output_dir=out,
+        latent_dim=2,
+        epochs=1,
+        batch_size=2,
+        device="cpu",
+        patch_size=(2, 1),
+    )
+
+    checkpoint = torch.load(out / "autoencoder.pt", map_location="cpu")
+    assert checkpoint["patch_size"] == [2, 1]
+    assert clustered["metrics"]["cluster_loss"] is not None
