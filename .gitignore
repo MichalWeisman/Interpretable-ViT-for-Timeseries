@@ -17,5 +17,4 @@ data/hypotension/processed_*/
 data/hypotension/mimic_hypotension/
 data/hypotension/mimic_cache/
 data/hypotension/mimic_hypotension_local_poc/
-data/hypotension/mimic_hypotension_colab_poc/
 .tools/
