@@ -1,33 +1,110 @@
+# Legacy compatibility path.
+# Prefer configs/datasets/mimic/targets.yaml for new MIMIC-IV target runs.
+
 mimic_path: mimic-iv-3.1.zip
 output_dir: data/mimic_targets
 cache_dir: data/mimic_targets/cache
+cohort_level: icu
 chunk_size: 1000000
 use_extracted_files: true
 use_filtered_cache: true
 require_full_window: true
 min_observations: 1
 
-windows:
-  - name: obs48_target24_gap0
-    observation_hours: 48
-    prediction_hours: 24
-    gap_hours: 0
-  - name: obs48_target24_gap8
-    observation_hours: 48
-    prediction_hours: 24
-    gap_hours: 8
-
+# Explicit per-target variable -> item ID mappings selected after notebook exploration.
 targets:
-  - cardiovascular_event
-  - nosocomial_infection
   - hypoglycemia
-  - prolonged_hyperglycemia
-  - in_hospital_mortality
+  - hypokalemia
+  - hypotension
 
-# Optional exact itemid overrides can be added here after inspecting local
-# MIMIC dictionaries. Regex defaults in the adapter cover common labels.
 lab_itemids: {}
+chart_itemids: {}
+inputevent_itemids: {}
 
-hyperglycemia_threshold: 180
-troponin_i_threshold: 0.12
-hypoglycemia_threshold: 70
+target_variables:
+  hypoglycemia:
+    lab_itemids:
+      blood_glucose: [50809, 50931, 52569, 52027]
+      wbc: [51300, 51301, 51755, 51756]
+      creatinine: [50912, 52546, 52024]
+      bun: [51006, 52647]
+      potassium: [50971, 52610, 50822, 52452]
+      magnesium: [50960]
+      hemoglobin: [50811, 51222, 51640]
+      pco2: [50818]
+      platelet_count: [51265, 53189]
+      po2: [50821]
+      sodium: [50983, 52623, 50824, 52455]
+    chart_itemids:
+      heart_rate: [220045]
+      systolic_bp: [220050, 225309, 220179, 224167, 227243]
+      diastolic_bp: [220051, 225310, 220180, 224643, 227242]
+      o2_saturation_pulseox: [220277, 220227]
+      temperature: [223762, 223761]
+    inputevent_itemids:
+      dextrose_maintenance: [221017, 220966, 220963, 220949, 220964, 220965, 220967, 221000, 221002]
+      dextrose_10: [220950, 220968]
+      dextrose_hypertonic: [221014, 228140, 220951, 228141, 228142, 220952]
+      insulin_prandial_short_acting: [223262, 229299, 223258]
+      insulin_intermediate: [223259]
+      insulin_basal_long_acting: [223260]
+      insulin_premixed: [223257, 223261]
+      insulin_u500: [229619]
+      lactated_ringers: [225828]
+  hypokalemia:
+    lab_itemids:
+      blood_glucose: [50809, 50931, 52569, 52027]
+      wbc: [51300, 51301, 51755, 51756]
+      creatinine: [50912, 52546, 52024]
+      bun: [51006, 52647]
+      potassium: [50971, 52610, 50822, 52452]
+      magnesium: [50960]
+      hemoglobin: [50811, 51222, 51640]
+      pco2: [50818]
+      platelet_count: [51265, 53189]
+      po2: [50821]
+      sodium: [50983, 52623, 50824, 52455]
+    chart_itemids:
+      heart_rate: [220045]
+      systolic_bp: [220050, 225309, 220179, 224167, 227243]
+      diastolic_bp: [220051, 225310, 220180, 224643, 227242]
+      o2_saturation_pulseox: [220277, 220227]
+      temperature: [223762, 223761]
+    inputevent_itemids:
+      potassium_iv: [225166]
+      potassium_bolus: [227522]
+      potassium_crrt: [227536]
+      lactated_ringers: [225828]
+  hypotension:
+    lab_itemids:
+      blood_glucose: [50809, 50931, 52569, 52027]
+      wbc: [51300, 51301, 51755, 51756]
+      creatinine: [50912, 52546, 52024]
+      bun: [51006, 52647]
+      potassium: [50971, 52610, 50822, 52452]
+      magnesium: [50960]
+      hemoglobin: [50811, 51222, 51640]
+      pco2: [50818]
+      platelet_count: [51265, 53189]
+      po2: [50821]
+      sodium: [50983, 52623, 50824, 52455]
+    chart_itemids:
+      heart_rate: [220045]
+      systolic_bp: [220050, 225309, 220179, 224167, 227243]
+      diastolic_bp: [220051, 225310, 220180, 224643, 227242]
+      o2_saturation_pulseox: [220277, 220227]
+      temperature: [223762, 223761]
+    inputevent_itemids:
+      dopamine: [221662]
+      norepinephrine: [221906]
+      lactated_ringers: [225828]
+
+windows:
+  - name: obs24_target8_gap0
+    observation_hours: 24
+    prediction_hours: 8
+    gap_hours: 0
+  - name: obs24_target8_gap2
+    observation_hours: 24
+    prediction_hours: 8
+    gap_hours: 2

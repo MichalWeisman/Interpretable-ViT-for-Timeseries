@@ -17,7 +17,7 @@ from sklearn.model_selection import train_test_split
 from .binning import TimeSeriesBinner
 from .autoencoder import cluster_autoencoder_embeddings, create_explanation_value_embeddings, train_explanation_value_autoencoder
 from .config import Config
-from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
+from .datasets import MIMICIVMultiTargetAdapter, MIMICTargetsConfig, TargetWindowConfig, load_mimic_targets_config
 from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
@@ -35,9 +35,9 @@ class PipelinePaths:
     mimic_path: str | Path | None = "mimic-iv-3.1.zip"
     records_path: str | Path | None = None
     labels_path: str | Path | None = None
-    dataset_dir: str | Path = "data/hypotension/mimic_hypotension"
-    processed_dir: str | Path = "data/hypotension/processed"
-    run_dir: str | Path = "runs/hypotension_v1"
+    dataset_dir: str | Path = "data/mimic_targets"
+    processed_dir: str | Path = "data/mimic_targets/processed/obs24_target8_gap0/hypoglycemia"
+    run_dir: str | Path = "runs/mimic_targets/obs24_target8_gap0/hypoglycemia"
 
 
 @dataclass
@@ -46,7 +46,7 @@ class PipelineRunConfig:
 
     paths: PipelinePaths = field(default_factory=PipelinePaths)
     config: Config = field(default_factory=Config)
-    mimic_config: MIMICHypotensionConfig | None = None
+    mimic_targets_config: MIMICTargetsConfig | None = None
     prepare_mimic: bool = True
     prepare_tensors: bool = True
     train: bool = True
@@ -71,8 +71,8 @@ def run_pipeline(run_config: PipelineRunConfig | None = None) -> PipelineResult:
     """Run data preparation, training, loading, evaluation, and explanations.
 
     This is the programmatic equivalent of running the CLI commands in order:
-    `prepare-mimic-hypotension`, `prepare-data`, `train`, `explain`,
-    `cluster`, and `plot`.
+    `prepare-mimic-targets`, `prepare-data`, `train`, `explain`, `cluster`,
+    and `plot`.
     """
 
     run_config = run_config or PipelineRunConfig()
@@ -86,13 +86,13 @@ def run_pipeline(run_config: PipelineRunConfig | None = None) -> PipelineResult:
 
     if run_config.prepare_mimic:
         logger.info("Pipeline stage prepare_mimic started")
-        mimic_config = run_config.mimic_config or MIMICHypotensionConfig(mimic_path=paths.mimic_path)
-        prepared = MIMICIVHypotensionAdapter(mimic_config).prepare()
-        prepared.save(paths.dataset_dir)
-        records_path = Path(paths.dataset_dir) / "records.csv"
-        labels_path = Path(paths.dataset_dir) / "labels.csv"
+        mimic_config = run_config.mimic_targets_config or _default_mimic_run_targets_config(paths)
+        outputs = MIMICIVMultiTargetAdapter(mimic_config).save_all(paths.dataset_dir)
+        dataset_path = outputs[(mimic_config.windows[0].name, mimic_config.targets[0])]
+        records_path = dataset_path / "records.csv"
+        labels_path = dataset_path / "labels.csv"
         artifacts["dataset_dir"] = str(Path(paths.dataset_dir))
-        logger.info("Pipeline stage prepare_mimic finished: dataset_dir=%s", paths.dataset_dir)
+        logger.info("Pipeline stage prepare_mimic finished: dataset_dir=%s target_dir=%s", paths.dataset_dir, dataset_path)
 
     if run_config.prepare_tensors:
         logger.info("Pipeline stage prepare_tensors started")
@@ -135,12 +135,29 @@ def run_pipeline(run_config: PipelineRunConfig | None = None) -> PipelineResult:
 def _resolve_input_tables(run_config: PipelineRunConfig) -> tuple[Path, Path]:
     paths = run_config.paths
     if run_config.prepare_mimic:
-        if paths.mimic_path is None and run_config.mimic_config is None:
-            raise ValueError("prepare_mimic=True requires paths.mimic_path or mimic_config.")
-        return Path(paths.dataset_dir) / "records.csv", Path(paths.dataset_dir) / "labels.csv"
+        if paths.mimic_path is None and run_config.mimic_targets_config is None:
+            raise ValueError("prepare_mimic=True requires paths.mimic_path or mimic_targets_config.")
+        config = run_config.mimic_targets_config or _default_mimic_run_targets_config(paths)
+        target_dir = Path(paths.dataset_dir) / config.windows[0].name / config.targets[0]
+        return target_dir / "records.csv", target_dir / "labels.csv"
     if paths.records_path is None or paths.labels_path is None:
         raise ValueError("prepare_mimic=False requires records_path and labels_path.")
     return Path(paths.records_path), Path(paths.labels_path)
+
+
+def _default_mimic_run_targets_config(paths: PipelinePaths) -> MIMICTargetsConfig:
+    config = load_mimic_targets_config(_default_mimic_targets_config_path())
+    config.mimic_path = paths.mimic_path
+    config.output_dir = paths.dataset_dir
+    config.cache_dir = Path(paths.dataset_dir) / "cache"
+    config.cohort_level = "icu"
+    config.windows = [TargetWindowConfig(name="obs24_target8_gap0", observation_hours=24, prediction_hours=8, gap_hours=0)]
+    config.targets = ["hypoglycemia"]
+    return config
+
+
+def _default_mimic_targets_config_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "configs" / "datasets" / "mimic" / "targets.yaml"
 
 
 def _prepare_tensor_splits(records_path: str | Path, labels_path: str | Path, config: Config, out_dir: str | Path) -> None:

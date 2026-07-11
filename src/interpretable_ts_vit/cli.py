@@ -17,7 +17,7 @@ from .autoencoder import cluster_autoencoder_embeddings, create_explanation_valu
 from .binning import TimeSeriesBinner
 from .config import load_config
 from .data import BinnedTimeSeriesDataset
-from .datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig, MIMICIVMultiTargetAdapter, load_mimic_targets_config
+from .datasets.mimic import MIMICIVMultiTargetAdapter, load_mimic_targets_config
 from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
@@ -40,25 +40,11 @@ def main(argv: list[str] | None = None) -> None:
     prepare.add_argument("--out", required=True)
     prepare.add_argument("--config")
 
-    mimic = sub.add_parser("prepare-mimic-hypotension")
-    mimic.add_argument("--mimic-path", required=True, help="Path to MIMIC-IV zip archive or extracted directory.")
-    mimic.add_argument("--out", required=True, help="Directory for records.csv, labels.csv, and metadata.")
-    mimic.add_argument("--observation-hours", type=float, default=24.0)
-    mimic.add_argument("--prediction-hours", type=float, default=6.0)
-    mimic.add_argument("--threshold", type=float, default=65.0, help="MAP threshold in mmHg for hypotension.")
-    mimic.add_argument("--chunk-size", type=int, default=1_000_000)
-    mimic.add_argument("--cache-dir", default="data/hypotension/mimic_cache")
-    mimic.add_argument("--read-zip-directly", action="store_true", help="Do not extract selected .csv.gz files before reading.")
-    mimic.add_argument("--no-filtered-cache", action="store_true", help="Do not read/write the filtered chartevents Parquet cache.")
-    mimic.add_argument("--progress-interval-chunks", type=int, default=1)
-    mimic.add_argument("--max-stays", type=int)
-    mimic.add_argument("--min-observations", type=int, default=1)
-    mimic.add_argument("--allow-short-prediction-window", action="store_true")
-    mimic.add_argument("--allow-missing-outcome-measurement", action="store_true")
-
     mimic_targets = sub.add_parser("prepare-mimic-targets")
-    mimic_targets.add_argument("--config", required=True, help="YAML/JSON multi-target MIMIC data-creation config.")
+    mimic_targets.add_argument("--config", required=True, help="YAML/JSON MIMIC-IV adapter config.")
     mimic_targets.add_argument("--out", help="Optional output directory override.")
+    mimic_targets.add_argument("--cohort-level", choices=["admission", "icu"], help="Override config cohort level.")
+    mimic_targets.add_argument("--targets", nargs="+", help="Override configured MIMIC target names.")
 
     train = sub.add_parser("train")
     train.add_argument("--data", required=True)
@@ -100,8 +86,6 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Running command %s", args.command)
     if args.command == "prepare-data":
         cmd_prepare_data(args)
-    elif args.command == "prepare-mimic-hypotension":
-        cmd_prepare_mimic_hypotension(args)
     elif args.command == "prepare-mimic-targets":
         cmd_prepare_mimic_targets(args)
     elif args.command == "train":
@@ -157,32 +141,13 @@ def cmd_prepare_data(args) -> None:
     logger.info("Finished preparing data tensors into %s", out)
 
 
-def cmd_prepare_mimic_hypotension(args) -> None:
-    """Create generic records/labels files for MIMIC-IV hypotension prediction."""
-    logger.info("Preparing MIMIC-IV hypotension CSV files into %s", args.out)
-    config = MIMICHypotensionConfig(
-        mimic_path=args.mimic_path,
-        observation_hours=args.observation_hours,
-        prediction_hours=args.prediction_hours,
-        hypotension_threshold=args.threshold,
-        chunk_size=args.chunk_size,
-        cache_dir=args.cache_dir,
-        use_extracted_files=not args.read_zip_directly,
-        use_filtered_cache=not args.no_filtered_cache,
-        progress_interval_chunks=args.progress_interval_chunks,
-        max_stays=args.max_stays,
-        min_observations=args.min_observations,
-        require_full_prediction_window=not args.allow_short_prediction_window,
-        require_outcome_measurement=not args.allow_missing_outcome_measurement,
-    )
-    prepared = MIMICIVHypotensionAdapter(config).prepare()
-    prepared.save(args.out)
-    logger.info("Finished preparing MIMIC-IV hypotension CSV files into %s", args.out)
-
-
 def cmd_prepare_mimic_targets(args) -> None:
     """Create records/labels files for configured MIMIC-IV prediction targets."""
     config = load_mimic_targets_config(args.config)
+    if args.cohort_level is not None:
+        config.cohort_level = args.cohort_level
+    if args.targets is not None:
+        config.targets = args.targets
     output_dir = args.out or config.output_dir
     logger.info("Preparing MIMIC-IV target datasets from config=%s into %s", args.config, output_dir)
     outputs = MIMICIVMultiTargetAdapter(config).save_all(output_dir)

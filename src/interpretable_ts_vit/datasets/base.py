@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class TargetWindowConfig:
+    """Generic observation/gap/prediction window definition in hours."""
+
+    name: str
+    observation_hours: float = 48.0
+    prediction_hours: float = 24.0
+    gap_hours: float = 0.0
+
+
+@dataclass
 class PreparedDataset:
     """Generic records/labels payload consumed by `TimeSeriesBinner`.
 

@@ -1,7 +1,7 @@
 import pandas as pd
 
 from interpretable_ts_vit.config import ClusterConfig, DataConfig, ExplainConfig, ModelConfig, TrainConfig
-from interpretable_ts_vit.data_modules import GenericCSVDataModule, MIMICHypotensionDataModule
+from interpretable_ts_vit.data_modules import GenericCSVDataModule
 from interpretable_ts_vit.model_modules import ViTTimeSeriesModule
 
 
@@ -61,48 +61,3 @@ def test_data_and_model_modules_run_split_workflow(tmp_path):
     assert model.display_cluster_heatmaps("test")
 
 
-def test_mimic_data_module_can_reuse_prepared_csv_files(tmp_path):
-    records_path = tmp_path / "records.csv"
-    labels_path = tmp_path / "labels.csv"
-    pd.DataFrame(
-        [
-            {"patient_id": "p1", "variable": "hr", "value": 70, "timestamp": "2026-01-01 00:00:00"},
-            {"patient_id": "p2", "variable": "hr", "value": 80, "timestamp": "2026-01-01 00:00:00"},
-        ]
-    ).to_csv(records_path, index=False)
-    pd.DataFrame([{"patient_id": "p1", "label": "false"}, {"patient_id": "p2", "label": "true"}]).to_csv(labels_path, index=False)
-
-    data = MIMICHypotensionDataModule(
-        records_path=records_path,
-        labels_path=labels_path,
-        processed_dir=tmp_path / "processed",
-    )
-
-    assert data.input_paths() == (records_path, labels_path)
-
-
-def test_mimic_data_module_cleans_reused_prepared_temperature_csv(tmp_path):
-    records_path = tmp_path / "records.csv"
-    labels_path = tmp_path / "labels.csv"
-    pd.DataFrame(
-        [
-            {"patient_id": "p1", "variable": "temperature", "value": 98.6, "timestamp": "2026-01-01 00:00:00"},
-            {"patient_id": "p1", "variable": "temperature", "value": 37.2, "timestamp": "2026-01-01 01:00:00"},
-            {"patient_id": "p1", "variable": "temperature", "value": 234123.0, "timestamp": "2026-01-01 02:00:00"},
-            {"patient_id": "p1", "variable": "heart_rate", "value": 80.0, "timestamp": "2026-01-01 00:00:00"},
-        ]
-    ).to_csv(records_path, index=False)
-    pd.DataFrame([{"patient_id": "p1", "label": "false"}]).to_csv(labels_path, index=False)
-    data = MIMICHypotensionDataModule(
-        records_path=records_path,
-        labels_path=labels_path,
-        processed_dir=tmp_path / "processed",
-    )
-
-    cleaned_records_path, returned_labels_path = data.input_paths()
-    cleaned = pd.read_csv(cleaned_records_path)
-
-    assert returned_labels_path == labels_path
-    assert cleaned_records_path == tmp_path / "processed" / "mimic_records_celsius.csv"
-    assert cleaned.loc[cleaned["variable"] == "temperature", "value"].round(1).tolist() == [37.0, 37.2]
-    assert cleaned.loc[cleaned["variable"] == "heart_rate", "value"].tolist() == [80.0]

@@ -1,313 +1,303 @@
 # Interpretable Time-Series ViT
 
-Research baseline for classifying irregularly sampled, multivariable time series, clustering class-specific explanation maps, and visualizing the clinical value patterns associated with those clusters.
+Research code for classifying irregular, multivariable clinical time series with a Vision Transformer, then explaining predictions by clustering patient-level explanation maps and rendering the clinical value patterns behind those clusters.
 
-## Input Shape
-
-Records table columns default to:
-
-- `patient_id`
-- `variable`
-- `value`
-- `timestamp`
-
-Labels table columns default to:
-
-- `patient_id`
-- `label`
-
-The binner converts each patient into a two-channel tensor `[2, variables, timesteps]`:
-
-- channel 0: normalized values
-- channel 1: observation mask
-
-## CLI
-
-```powershell
-tsvit prepare-mimic-hypotension --mimic-path mimic-iv-3.1.zip --out data/hypotension/mimic_hypotension
-tsvit prepare-mimic-targets --config configs/mimic_targets.yaml
-tsvit prepare-data --records records.csv --labels labels.csv --out data/hypotension/processed --config config.yaml
-tsvit train --data data/hypotension/processed --out runs/example --config config.yaml
-tsvit explain --run runs/example --split test
-tsvit cluster --run runs/example --split test
-tsvit plot --run runs/example
-```
-
-The same functionality is available from Python through `interpretable_ts_vit`.
-
-## Autoencoder-Clustered Value Heatmaps
-
-The current notebook and pipeline use one interpretation path:
-
-1. Generate per-patient model explanations with `grad_attention_rollout` only.
-2. Pair each explanation map with the patient's denormalized clinical value map.
-3. Train a small autoencoder on train `[explanation, value]` maps and validate it on validation maps.
-4. Encode the selected split with that autoencoder and cluster the latent vectors within each predicted class.
-5. Plot cluster-level mean clinical value heatmaps, with opacity or border width showing mean rollout importance.
-
-Saved artifacts are reused when present:
+The project is organized around one portable data contract:
 
 ```text
-data/hypotension/processed_full_hypotension_importance_values/{train,val,test}.npz
-runs/full_hypotension_importance_values/model.pt
-runs/full_hypotension_importance_values/explanations/<split>/*.npy
-runs/full_hypotension_importance_values/clusters/<split>/autoencoder.pt
-runs/full_hypotension_importance_values/clusters/<split>/autoencoder_embeddings.csv
-runs/full_hypotension_importance_values/clusters/<split>/autoencoder_metrics.json
+dataset adapter output or generic CSVs
+  -> records.csv + labels.csv
+  -> binned tensor splits
+  -> ViT model
+  -> explanation maps
+  -> explanation/value clusters
+  -> clinical value heatmaps
 ```
 
-Configure clustering with:
+## What This Project Does
 
-```yaml
-cluster:
-  feature_mode: autoencoder
-  method: kmeans
-  n_clusters: 8
-  autoencoder_latent_dim: 16
-  autoencoder_epochs: 50
-  autoencoder_learning_rate: 0.001
-  autoencoder_batch_size: 32
-  autoencoder_early_stopping_patience: 10
-  plot_mode: value_with_importance_opacity
-  importance_threshold: null
-  show_values: true
-```
+The package turns patient event tables into fixed-shape tensors, trains a small ViT classifier, generates per-patient importance maps with `grad_attention_rollout`, clusters patients using an autoencoder over `[explanation, value]` maps, and plots cluster-level heatmaps where color shows observed clinical values and opacity or borders show model importance.
 
-Use `method: hdbscan` when you want HDBSCAN to infer the number of clusters from density. In that mode, `n_clusters` is ignored; tune `hdbscan_min_cluster_size` and `hdbscan_min_samples` instead. HDBSCAN noise points are kept as cluster `-1`.
+It supports two input paths:
 
-Visual encoding:
+- Any already prepared `records.csv` and `labels.csv` pair with the generic schema below.
+- Dataset-specific adapters that export that same schema. MIMIC-IV v3.1 target generation is the current concrete adapter example.
 
-- color = mean observed clinical value
-- opacity or border width = mean `grad_attention_rollout` importance
-- gray = no observations for that variable/time cell
-- optional cell label = mean observed clinical value
-
-### How Cluster Values Are Computed
-
-Prepared tensors have shape `[patients, 2, variables, timesteps]`:
-
-- channel 0, `D`: normalized values
-- channel 1, `M`: observed-value mask
-
-Missing cells are stored as `D=0, M=0`. Cluster value matrices are computed from denormalized observed values only:
+## Repository Structure
 
 ```text
-raw_value = normalized_value * training_std(variable) + training_mean(variable)
-cluster_value(variable, time) = sum(raw_value * mask) / sum(mask)
+.
+|-- main.py                         # one-file end-to-end workflow for IDE/script use
+|-- pyproject.toml                  # package metadata, dependencies, and tsvit CLI entrypoint
+|-- requirements.txt                # dependency fallback for non-editable installs
+|-- configs/
+|   |-- datasets/
+|   |   `-- mimic/
+|   |       `-- targets.yaml        # canonical MIMIC-IV target-generation config
+|   `-- mimic_targets.yaml          # legacy compatibility config path
+|-- data/                           # local generated data, caches, and prepared CSVs
+|-- notebooks/
+|   `-- mimic_targets/              # target/item exploration and analysis notebooks
+|-- src/interpretable_ts_vit/
+|   |-- cli.py                      # tsvit prepare/train/explain/cluster/plot commands
+|   |-- config.py                   # dataclass configs loaded from YAML/JSON
+|   |-- pipeline.py                 # programmatic end-to-end pipeline
+|   |-- binning.py                  # records/labels -> tensor binner
+|   |-- model.py                    # ViT classifier wrapper
+|   |-- training.py                 # training, prediction, and evaluation loops
+|   |-- explain.py                  # explanation-map generation
+|   |-- autoencoder.py              # explanation/value embedding and clustering
+|   |-- visualization.py            # value aggregation and heatmap rendering
+|   |-- datasets/
+|   |   |-- base.py                 # PreparedDataset, TargetWindowConfig, adapter base types
+|   |   |-- mimic/                  # canonical MIMIC-IV adapter package
+|   |   |-- mimic_targets.py        # legacy compatibility import wrapper
+|   |   `-- mimic_iv.py             # legacy compatibility import wrapper
+|   |-- data_modules/               # reusable data preparation modules
+|   `-- model_modules/              # reusable model workflow modules
+`-- tests/                          # unit and end-to-end smoke tests
 ```
 
-If `sum(mask) == 0`, the output matrix stores `NaN` and the plot renders that cell as gray.
+## Setup
 
-## MIMIC-IV Hypotension Dataset
-
-The package includes a plug-in dataset adapter for MIMIC-IV v3.1 ICU data. It
-reads either the original PhysioNet zip archive or an extracted MIMIC-IV
-directory, then writes the generic `records.csv` and `labels.csv` files used by
-the rest of the pipeline.
-
-Dataset-specific files live under `data/<dataset>/`; notebooks follow the same
-layout under `notebooks/<dataset>/`. For example, the hypotension assets are in
-`data/hypotension/` and `notebooks/hypotension/`.
+Use Python 3.10 or newer.
 
 ```powershell
-tsvit prepare-mimic-hypotension `
-  --mimic-path mimic-iv-3.1.zip `
-  --out data/hypotension/mimic_hypotension `
-  --observation-hours 24 `
-  --prediction-hours 6 `
-  --threshold 65 `
-  --chunk-size 1000000 `
-  --cache-dir data/hypotension/mimic_cache
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e ".[dev,explain]"
 ```
 
-Each row in `labels.csv` corresponds to an ICU `stay_id`. By default, the label
-is `true` if mean arterial pressure, using MIMIC item IDs `220052` or `220181`,
-is less than or equal to 65 mmHg during the 6 hours after the 24-hour
-observation window.
-
-MIMIC-IV dates are deidentified with patient-specific shifts, so the adapter
-exports timestamps as relative ICU time anchored at `2000-01-01 00:00:00`.
-That makes columns in the ViT input represent time since ICU admission rather
-than incomparable absolute calendar dates.
-
-### MIMIC Cache
-
-The cache is an intermediate speed-up layer. It is **not** the model input and
-it is **not** the tensor dataset. You can delete it and regenerate it from the
-MIMIC zip.
-
-By default, `--cache-dir data/hypotension/mimic_cache` contains two kinds of files:
-
-```text
-data/hypotension/mimic_cache/
-  extracted/
-    icu/
-      icustays.csv.gz
-      chartevents.csv.gz
-  chartevents_filtered_<hash>.parquet
-```
-
-`extracted/` contains selected raw MIMIC `.csv.gz` files copied out of the big
-zip. This avoids repeatedly reading compressed files through the zip container.
-It does **not** extract the whole MIMIC archive.
-
-`chartevents_filtered_<hash>.parquet` is a filtered cache built from
-`chartevents.csv.gz`. It contains only:
-
-- eligible ICU `stay_id`s for the configured observation/prediction windows
-- relevant MIMIC `itemid`s used as model variables or hypotension outcomes
-- numeric chart values from `valuenum`
-- the raw `charttime`, `stay_id`, `itemid`, and `valuenum` columns
-
-The hash in the filename changes when the eligible cohort or selected item IDs
-change, so incompatible runs do not accidentally reuse the wrong filtered
-events.
-
-While scanning raw `chartevents.csv.gz`, the adapter prints a progress bar with
-percentage and ETA. The percentage is estimated from compressed bytes consumed,
-not from a pre-counted number of rows, so it avoids an extra full scan while
-still giving a practical time-left estimate.
-
-The portable pre-tensor output is still:
-
-```text
-data/hypotension/mimic_hypotension/
-  records.csv
-  labels.csv
-  dataset_metadata.json
-```
-
-If you create data on one computer and train on another, copy
-`data/hypotension/mimic_hypotension/`. You usually do not need to copy
-`data/hypotension/mimic_cache/`.
-
-To disable cache behavior:
+If you do not want an editable install, use the requirements file:
 
 ```powershell
-tsvit prepare-mimic-hypotension `
-  --mimic-path mimic-iv-3.1.zip `
-  --out data/hypotension/mimic_hypotension `
-  --read-zip-directly `
-  --no-filtered-cache
+pip install -r requirements.txt
 ```
 
-After creating the MIMIC records and labels, run:
+The editable install exposes the CLI command:
 
 ```powershell
-tsvit prepare-data --records data/hypotension/mimic_hypotension/records.csv --labels data/hypotension/mimic_hypotension/labels.csv --out data/hypotension/processed --config config.yaml
+tsvit --help
 ```
 
-To add another dataset, implement `DatasetAdapter.prepare()` and return a
-`PreparedDataset` with the same generic records/labels schema.
+## Data Format
 
-## MIMIC-IV Multi-Target Dataset Creation
+All dataset adapters must produce the same generic CSV schema. MIMIC-IV is one source adapter; downstream tensor preparation, training, explanation, clustering, and plotting are dataset-agnostic once these files exist.
 
-Use the config-driven endpoint to create one pre-tensor dataset per prediction
-target and window configuration from the zipped MIMIC-IV archive:
+`records.csv`:
+
+| Column | Meaning |
+| --- | --- |
+| `patient_id` | Stable example id. For MIMIC targets this is either `hadm_id` or `stay_id`, stored as text. |
+| `variable` | Clinical variable name, for example `heart_rate`, `blood_glucose`, or `mean_bp`. |
+| `value` | Numeric observed value. Binary event features use `1.0`. |
+| `timestamp` | Timestamp used for binning. MIMIC adapters export relative time anchored at `2000-01-01 00:00:00`. |
+
+`labels.csv`:
+
+| Column | Meaning |
+| --- | --- |
+| `patient_id` | Must match ids in `records.csv`. |
+| `label` | Class label, usually `true` or `false`. |
+
+`prepare-data` converts these tables into tensors with shape `[patients, 2, variables, timesteps]`:
+
+- channel `0`: normalized values
+- channel `1`: observation mask
+
+Missing cells are represented as `value = 0` and `mask = 0`. The binner is fitted on the training split only, so validation and test data do not leak variable vocabularies, normalization statistics, or inferred time bounds.
+
+## Running the Pipeline
+
+The common command sequence starts with either your own compatible CSVs or a dataset adapter. For the current MIMIC-IV adapter:
 
 ```powershell
-tsvit prepare-mimic-targets --config configs/mimic_targets.yaml
+tsvit prepare-mimic-targets --config configs/datasets/mimic/targets.yaml
+
+tsvit prepare-data `
+  --records data/mimic_targets/<window>/<target>/records.csv `
+  --labels data/mimic_targets/<window>/<target>/labels.csv `
+  --out data/mimic_targets/processed/<window>/<target> `
+  --config config.yaml
+
+tsvit train `
+  --data data/mimic_targets/processed/<window>/<target> `
+  --out runs/mimic_targets/<window>/<target> `
+  --config config.yaml
+
+tsvit explain --run runs/mimic_targets/<window>/<target> --split test
+tsvit cluster --run runs/mimic_targets/<window>/<target> --split test --config config.yaml
+tsvit plot --run runs/mimic_targets/<window>/<target> --split test --config config.yaml
 ```
 
-The default config creates two window variants:
+Use the same `prepare-data`, `train`, `explain`, `cluster`, and `plot` commands for any non-MIMIC dataset once you have compatible `records.csv` and `labels.csv` files.
 
-- `obs48_target24_gap0`: 48-hour observation, 24-hour prediction, no gap
-- `obs48_target24_gap8`: 48-hour observation, 24-hour prediction, 8-hour gap
+## MIMIC-IV Target Workflows
 
-For each window it writes target-specific folders under `data/mimic_targets/`,
-for example:
+MIMIC-IV is implemented as a dataset-specific adapter under `interpretable_ts_vit.datasets.mimic`. It is an example source database, not the pipeline interface itself.
 
-```text
-data/mimic_targets/obs48_target24_gap0/hypoglycemia/
-  records.csv
-  labels.csv
-  dataset_metadata.json
+The current MIMIC-IV entrypoint is:
+
+```powershell
+tsvit prepare-mimic-targets --config configs/datasets/mimic/targets.yaml
 ```
 
-These are source CSVs only, not tensors. Run `tsvit prepare-data` separately
-when you want to bin one of the generated target datasets.
+Optional overrides:
+
+```powershell
+tsvit prepare-mimic-targets --config configs/datasets/mimic/targets.yaml --out data/mimic_targets_custom
+tsvit prepare-mimic-targets --config configs/datasets/mimic/targets.yaml --cohort-level admission
+tsvit prepare-mimic-targets --config configs/datasets/mimic/targets.yaml --cohort-level icu
+```
+
+The legacy path `configs/mimic_targets.yaml` remains supported for existing commands.
+
+`cohort_level` controls the prediction unit:
+
+- `admission`: one example per hospital admission, with `patient_id = hadm_id`; timestamps are relative to hospital admission.
+- `icu`: one example per ICU stay, with `patient_id = stay_id`; timestamps are relative to ICU admission.
+
+Both modes anchor exported timestamps at `2000-01-01 00:00:00`, because MIMIC dates are deidentified with patient-specific shifts.
 
 The current targets are:
 
-- `cardiovascular_event`
-- `nosocomial_infection`
 - `hypoglycemia`
-- `prolonged_hyperglycemia`
-- `in_hospital_mortality`
+- `hypokalemia`
+- `hypotension`
 
-Each row in `labels.csv` corresponds to a hospital admission (`hadm_id`).
-Timestamps are relative to hospital admission and anchored at
-`2000-01-01 00:00:00`. The adapter uses filtered Parquet caches under the
-configured `cache_dir` so repeated runs with new windows or targets do not need
-to rescan every raw MIMIC table from the zip.
+To generate a single target from the CLI, choose the cohort/window settings in the config and pass the target as an override. For example:
 
-Use `notebooks/mimic_targets/mimic_general_item_exploration.ipynb` to inspect
-the selected lab/chart/input item mappings before reading patient-level event
-tables. After generating datasets, use
-`notebooks/mimic_targets/mimic_target_dataset_exploration.ipynb` to inspect
-label balance, variable coverage, value distributions, event timing, and
-positive/negative summaries.
+```yaml
+cohort_level: icu
+windows:
+  - name: obs24_target8_gap0
+    observation_hours: 24
+    prediction_hours: 8
+    gap_hours: 0
+  - name: obs24_target8_gap2
+    observation_hours: 24
+    prediction_hours: 8
+    gap_hours: 2
+```
 
-## One-File Endpoint
+Then run:
 
-Use [main.py](main.py) when you want to run the whole workflow without the
-`tsvit` CLI. Edit the `SETTINGS`, `MIMIC_SETTINGS`, and `PIPELINE_CONFIG`
-objects at the top of the file, then run:
+```powershell
+tsvit prepare-mimic-targets --config configs/datasets/mimic/targets.yaml
+```
+
+For each configured window and target, the adapter writes portable pre-tensor files:
+
+```text
+data/mimic_targets/<window>/<target>/
+  records.csv
+  labels.csv
+  dataset_metadata.json
+```
+
+These are source CSVs, not tensors. Run `tsvit prepare-data` before training.
+
+## MIMIC-IV Target Configuration
+
+`configs/datasets/mimic/targets.yaml` controls MIMIC dataset creation. The legacy `configs/mimic_targets.yaml` file is kept as a compatibility copy. The most important fields are:
+
+| Field | Purpose |
+| --- | --- |
+| `mimic_path` | Path to the MIMIC-IV zip archive or extracted directory. |
+| `output_dir` | Root directory for prepared target folders. |
+| `cache_dir` | Disposable cache for extracted raw tables and filtered Parquet files. |
+| `cohort_level` | `admission` for `hadm_id` examples or `icu` for `stay_id` examples. |
+| `windows` | Observation, optional gap, and prediction windows in hours. |
+| `chunk_size` | Number of rows per raw MIMIC chunk read. |
+| `use_extracted_files` | Copies selected `.csv.gz` files out of the zip for faster repeated reads. |
+| `use_filtered_cache` | Reuses filtered Parquet event tables when compatible. |
+| `require_full_window` | Drops stays/admissions without the full prediction window when `true`. |
+| `require_outcome_measurement` | For targets that depend on prediction-window outcome measurements, drops examples without those measurements when `true`. |
+| `max_admissions` | Optional admission cap for smoke runs. |
+| `max_stays` | Optional ICU-stay cap for smoke runs. |
+
+Prediction timing uses the generic `TargetWindowConfig` shape and is defined by `windows`, not by the model-training config:
+
+```yaml
+windows:
+  - name: obs24_target8_gap0
+    observation_hours: 24
+    prediction_hours: 8
+    gap_hours: 0
+  - name: obs24_target8_gap2
+    observation_hours: 24
+    prediction_hours: 8
+    gap_hours: 2
+```
+
+For each window:
+
+- `observation_hours` is the history written into `records.csv`.
+- `gap_hours` is the delay between the observation window and the prediction window.
+- `prediction_hours` is the future interval used to assign the target label.
+
+MIMIC target names and target thresholds live in `src/interpretable_ts_vit/datasets/mimic/mimic_targets.py`. Per-target variable mappings live under `target_variables` in `configs/datasets/mimic/targets.yaml`; use `notebooks/mimic_targets/mimic_general_item_exploration.ipynb` to review candidates and write the selected IDs into the config.
+
+The adapter resolves dictionaries from MIMIC metadata tables when available. Generated `dataset_metadata.json` records the resolved mappings, source tables, target definition, label counts, and cohort-level details.
+
+## One-File Workflow
+
+Use [main.py](main.py) when you want to run the whole workflow from an IDE, scheduler, or notebook without manually calling each CLI command.
 
 ```powershell
 python main.py
 ```
 
-The endpoint performs:
+`main.py` currently builds a `MIMICTargetsConfig` and writes into the `data/mimic_targets` and `runs/mimic_targets` layout. Edit `SETTINGS`, `MIMIC_SETTINGS`, and `PIPELINE_CONFIG` at the top of the file to change paths, targets, cohort level, target windows, model size, training options, or which stages run.
 
-- MIMIC-IV hypotension records/labels creation, or generic records/labels reuse
-- tensor preparation with the fitted binner
-- model training and saving
-- model loading and test-set evaluation
-- explanation map generation
-- explanation clustering
-- clinical value heatmap rendering for the clustered patients
+The one-file endpoint performs:
 
-For programmatic use from another script or notebook, call:
-
-```python
-from interpretable_ts_vit.pipeline import PipelineRunConfig, run_pipeline
-
-result = run_pipeline(PipelineRunConfig())
-print(result.artifacts)
-```
+- MIMIC target records/labels creation, or generic records/labels reuse
+- tensor preparation
+- model training
+- model loading and evaluation
+- explanation generation
+- explanation/value clustering
+- clinical heatmap rendering
 
 ## Configuration
 
-Configuration files can be YAML or JSON. YAML requires `PyYAML`; JSON works
-with the standard library.
+Training and interpretation configs can be YAML or JSON. YAML requires `PyYAML`, which is included in the project dependencies. This config controls tensor binning, model architecture, training, explanations, and clustering after a target dataset has already been created. Dataset-adapter observation, gap, and prediction window sizes live in that adapter's config, for example `configs/datasets/mimic/targets.yaml` for MIMIC-IV.
 
 ```yaml
 data:
   granularity: 30min
-  time_start: "2026-01-01 00:00:00"
-  time_end: "2026-01-03 00:00:00"
   aggregation: mean
   val_fraction: 0.2
   test_fraction: 0.2
+  random_state: 13
 model:
   patch_size: [1, 4]
   embed_dim: 64
   depth: 2
   num_heads: 4
+  mlp_ratio: 2.0
+  dropout: 0.1
 train:
   batch_size: 16
   epochs: 10
   learning_rate: 0.001
+  weight_decay: 0.0001
+  device: auto
   early_stopping_patience: 3
   early_stopping_monitor: val_loss
   early_stopping_min_delta: 0.0
   early_stopping_mode: auto
   restore_best_model: true
   verbose: true
+explain:
+  method: grad_attention_rollout
+  target_class: null
+  batch_size: 16
 cluster:
-  method: kmeans
   feature_mode: autoencoder
+  method: kmeans
   n_clusters: 8
   autoencoder_latent_dim: 16
   autoencoder_epochs: 50
@@ -316,35 +306,105 @@ cluster:
   autoencoder_early_stopping_patience: 10
   hdbscan_min_cluster_size: 5
   hdbscan_min_samples: null
+  plot_mode: value_with_importance_opacity
+  importance_threshold: null
+  show_values: true
+  use_normal_ranges: false
 ```
 
-Early stopping is optional. Leave `early_stopping_patience` as `null` to train
-for the full number of epochs. When a validation split is available, each epoch
-prints progress and records `val_loss` plus validation metrics in `metrics.json`. With
-`restore_best_model: true`, the saved `model.pt` uses the best validation
-checkpoint according to `early_stopping_monitor`; `val_loss` is minimized, while
-metrics such as `val_macro_f1`, `val_accuracy`, `val_auc`, and `val_auroc` are maximized
-when `early_stopping_mode: auto`.
+Early stopping is optional. Leave `early_stopping_patience` as `null` to train for the full number of epochs. With `restore_best_model: true`, `model.pt` is restored to the best validation checkpoint according to `early_stopping_monitor`.
 
-## Python Usage
+`time_start` and `time_end` are optional lower-level binning controls. For normal MIMIC target runs, prefer setting `observation_hours`, `prediction_hours`, and `gap_hours` in the target config, then let the generated relative timestamps flow into `prepare-data`.
 
-For notebook experiments, use a data module plus a model module so each stage
-can be rerun independently:
+## Outputs and Artifacts
+
+Prepared source datasets:
+
+```text
+data/mimic_targets/<window>/<target>/
+  records.csv
+  labels.csv
+  dataset_metadata.json
+```
+
+Processed tensor datasets:
+
+```text
+data/mimic_targets/processed/<window>/<target>/
+  train.npz
+  val.npz
+  test.npz
+  binner.json
+  variable_vocab.json
+  splits.json
+```
+
+Model run outputs:
+
+```text
+runs/mimic_targets/<window>/<target>/
+  model.pt
+  metrics.json
+  predictions.csv
+  <split>_predictions.csv
+  <split>_evaluation_metrics.json
+  explanations/<split>/*.npy
+  clusters/<split>/cluster_assignments.csv
+  clusters/<split>/autoencoder.pt
+  clusters/<split>/autoencoder_embeddings.csv
+  clusters/<split>/autoencoder_metrics.json
+  cluster_values/<split>/*.npy
+  cluster_heatmaps/<split>/*.png
+  cluster_centroid_heatmaps/<split>/**/*.png
+```
+
+MIMIC caches under `cache_dir` are only speed-up artifacts. They are not model inputs and do not need to be copied when moving a prepared dataset to another machine. The portable files are `records.csv`, `labels.csv`, and `dataset_metadata.json`.
+
+## Explanation and Heatmap Flow
+
+The interpretation path is:
+
+1. Generate per-patient `grad_attention_rollout` maps.
+2. Pair each explanation map with the patient's denormalized clinical value map.
+3. Train an autoencoder on train `[explanation, value]` maps and validate on validation maps.
+4. Encode the selected split into latent vectors.
+5. Cluster latent vectors with `kmeans` or `hdbscan`.
+6. Plot cluster-level clinical values with optional importance opacity or borders.
+
+Visual encoding:
+
+- color = mean observed clinical value
+- opacity or border width = mean rollout importance
+- gray = no observed values for that variable/time cell
+- optional cell label = mean observed clinical value
+
+Cluster values are computed from denormalized observed cells only:
+
+```text
+raw_value = normalized_value * training_std(variable) + training_mean(variable)
+cluster_value(variable, time) = sum(raw_value * mask) / sum(mask)
+```
+
+If `sum(mask) == 0`, the output stores `NaN` and the plot renders the cell as gray.
+
+## Python API Usage
+
+For notebook experiments, use `GenericCSVDataModule` plus `ViTTimeSeriesModule` so stages can be rerun independently:
 
 ```python
 from interpretable_ts_vit.config import ClusterConfig, DataConfig, ModelConfig, TrainConfig
-from interpretable_ts_vit.data_modules import MIMICHypotensionDataModule
+from interpretable_ts_vit.data_modules import GenericCSVDataModule
 from interpretable_ts_vit.model_modules import ViTTimeSeriesModule
 
-data = MIMICHypotensionDataModule(
-    records_path="data/hypotension/mimic_hypotension/records.csv",
-    labels_path="data/hypotension/mimic_hypotension/labels.csv",
-    processed_dir="data/hypotension/processed",
+data = GenericCSVDataModule(
+    records_path="data/mimic_targets/obs24_target8_gap0/hypoglycemia/records.csv",
+    labels_path="data/mimic_targets/obs24_target8_gap0/hypoglycemia/labels.csv",
+    processed_dir="data/mimic_targets/processed/obs24_target8_gap0/hypoglycemia",
     data_config=DataConfig(granularity="30min"),
 )
 
 model = ViTTimeSeriesModule(
-    run_dir="runs/hypotension_v1",
+    run_dir="runs/mimic_targets/obs24_target8_gap0/hypoglycemia",
     model_config=ModelConfig(patch_size=(1, 4)),
     train_config=TrainConfig(epochs=3, verbose=True),
     cluster_config=ClusterConfig(n_clusters=4, show_values=True),
@@ -359,21 +419,26 @@ model.plot_cluster_values(data, split="test")
 model.display_cluster_heatmaps(split="test")
 ```
 
-The lower-level API remains available when you want to manage tensors and model
-objects yourself:
+For full programmatic orchestration:
+
+```python
+from interpretable_ts_vit.pipeline import PipelineRunConfig, run_pipeline
+
+result = run_pipeline(PipelineRunConfig())
+print(result.artifacts)
+```
+
+The lower-level API remains available when you want to manage tensors and model objects yourself:
 
 ```python
 import pandas as pd
+
 from interpretable_ts_vit import TimeSeriesBinner, ViTConfig, ViTTimeSeriesClassifier
-from interpretable_ts_vit.datasets import MIMICIVHypotensionAdapter, MIMICHypotensionConfig
 from interpretable_ts_vit.data import BinnedTimeSeriesDataset
 from interpretable_ts_vit.training import train_model
 
-prepared = MIMICIVHypotensionAdapter(
-    MIMICHypotensionConfig(mimic_path="mimic-iv-3.1.zip")
-).prepare()
-records = prepared.records
-labels = prepared.labels
+records = pd.read_csv("data/mimic_targets/obs24_target8_gap0/hypoglycemia/records.csv")
+labels = pd.read_csv("data/mimic_targets/obs24_target8_gap0/hypoglycemia/labels.csv")
 
 binner = TimeSeriesBinner(granularity="30min")
 binned = binner.fit_transform(records, labels)
@@ -389,22 +454,33 @@ model = ViTTimeSeriesClassifier(
 metrics = train_model(model, dataset)
 ```
 
-## Artifacts
+## Notebooks
 
-`prepare-data` writes train/validation/test `.npz` files plus `binner.json`
-and `variable_vocab.json`. `train` writes `model.pt`, `metrics.json`, and
-`predictions.csv`. Evaluation metrics include `auc`/`auroc`, `tpr`, `fpr`,
-`tnr`, `fnr`, `ppv`, accuracy, macro F1, and the confusion matrix. `explain`
-writes per-patient explanation maps. `cluster`
-writes cluster assignments and explanation-space cluster averages. `plot`
-writes `cluster_values/*.npy` and PNG value heatmaps whose colors and cell
-labels represent mean observed clinical values, not explanation scores.
+The MIMIC target notebooks live under `notebooks/mimic_targets/`:
 
-## Notes
+- `mimic_general_item_exploration.ipynb`: inspect lab, chart, prescription, and input-event mappings before large dataset generation.
+- `mimic_target_dataset_exploration.ipynb`: inspect generated label balance, variable coverage, value distributions, event timing, and positive/negative summaries.
+- `hypotension_importance_values.ipynb`: local analysis around hypotension explanation/value outputs.
 
-- Fit the binner on training data only to avoid leaking variable vocab,
-  normalization statistics, or inferred time bounds from validation/test data.
-- Missing observations are represented by `D=0` and `M=0`; observed values use
-  `M=1` after per-variable normalization.
-- Unknown variables at transform time are ignored so deployed tensors keep the
-  same shape learned during training.
+## Testing
+
+Run the test suite with:
+
+```powershell
+python -m pytest
+```
+
+Useful focused tests while working on the target adapter:
+
+```powershell
+python -m pytest tests/test_mimic_targets_adapter.py
+python -m pytest tests/test_pipeline.py
+```
+
+## Practical Notes
+
+- Do not use `tsvit prepare-mimic-hypotension`; the current CLI uses `prepare-mimic-targets` for MIMIC target creation.
+- Use `GenericCSVDataModule` for prepared records/labels datasets.
+- Unknown variables at transform time are ignored so deployed tensors keep the same shape learned during training.
+- MIMIC caches can be deleted and regenerated from the original zip or extracted MIMIC directory.
+- HDBSCAN is available with `cluster.method: hdbscan`; in that mode `n_clusters` is ignored and noise points are assigned cluster `-1`.

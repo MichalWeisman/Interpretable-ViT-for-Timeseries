@@ -27,7 +27,7 @@
     "low": 70,
     "high": 100,
     "unit": "mmHg",
-    "note": "Generic adult MAP plotting range; hypotension tasks may use a lower clinical threshold such as 65 mmHg."
+    "note": "Generic adult MAP plotting range."
   },
   "respiratory_rate": {
     "low": 12,
@@ -40,6 +40,12 @@
     "high": 100,
     "unit": "%",
     "note": "Generic adult oxygen saturation plotting range."
+  },
+  "o2_saturation_pulseox": {
+    "low": 95,
+    "high": 100,
+    "unit": "%",
+    "note": "Generic adult pulse oximetry oxygen saturation plotting range."
   },
   "temperature": {
     "low": 36.5,
@@ -65,6 +71,24 @@
     "unit": "mg/dL",
     "note": "Generic adult serum creatinine plotting range."
   },
+  "bun": {
+    "low": 7,
+    "high": 20,
+    "unit": "mg/dL",
+    "note": "Generic adult blood urea nitrogen plotting range."
+  },
+  "potassium": {
+    "low": 3.6,
+    "high": 5.0,
+    "unit": "mmol/L",
+    "note": "Generic adult serum potassium plotting range."
+  },
+  "magnesium": {
+    "low": 1.7,
+    "high": 2.4,
+    "unit": "mg/dL",
+    "note": "Generic adult serum magnesium plotting range."
+  },
   "albumin": {
     "low": 3.5,
     "high": 5.0,
@@ -76,6 +100,36 @@
     "high": 11000,
     "unit": "cells/uL",
     "note": "Generic white blood cell count range."
+  },
+  "hemoglobin": {
+    "low": 12,
+    "high": 17,
+    "unit": "g/dL",
+    "note": "Broad adult hemoglobin plotting range."
+  },
+  "pco2": {
+    "low": 35,
+    "high": 45,
+    "unit": "mmHg",
+    "note": "Generic blood gas PCO2 plotting range."
+  },
+  "platelet_count": {
+    "low": 150000,
+    "high": 450000,
+    "unit": "cells/uL",
+    "note": "Generic platelet count plotting range."
+  },
+  "po2": {
+    "low": 80,
+    "high": 100,
+    "unit": "mmHg",
+    "note": "Generic arterial PO2 plotting range."
+  },
+  "sodium": {
+    "low": 135,
+    "high": 145,
+    "unit": "mmol/L",
+    "note": "Generic adult serum sodium plotting range."
   },
   "ldh": {
     "low": 140,
@@ -132,6 +186,42 @@
     "note": "Medication/input exposure event indicator."
   },
   "dextrose_10": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication/input exposure event indicator."
+  },
+  "previous_dextrose_treatment": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication/input exposure event indicator."
+  },
+  "previous_insulin_treatment": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication/input exposure event indicator."
+  },
+  "previous_potassium_chloride_treatment": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication/input exposure event indicator."
+  },
+  "previous_dopamine_treatment": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication/input exposure event indicator."
+  },
+  "previous_norepinephrine_treatment": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Medication/input exposure event indicator."
+  },
+  "previous_fluids_given": {
     "low": 0,
     "high": 1,
     "unit": "event",

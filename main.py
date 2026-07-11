@@ -17,12 +17,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+MIMIC_CONFIG_PATH = ROOT / "configs" / "datasets" / "mimic" / "targets.yaml"
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from interpretable_ts_vit.config import ClusterConfig, Config, DataConfig, ExplainConfig, ModelConfig, TrainConfig
-from interpretable_ts_vit.datasets import MIMICHypotensionConfig
+from interpretable_ts_vit.datasets import TargetWindowConfig, load_mimic_targets_config
 from interpretable_ts_vit.pipeline import PipelinePaths, PipelineRunConfig, run_pipeline
 
 
@@ -33,20 +34,27 @@ SETTINGS = {
     "mimic_path": ROOT / "mimic-iv-3.1.zip",
     "records_path": None,
     "labels_path": None,
-    "dataset_dir": ROOT / "data" / "hypotension" / "mimic_hypotension",
-    "processed_dir": ROOT / "data" / "hypotension" / "processed",
-    "run_dir": ROOT / "runs" / "hypotension_v1",
+    "dataset_dir": ROOT / "data" / "mimic_targets",
+    "processed_dir": ROOT / "data" / "mimic_targets" / "processed" / "obs24_target8_gap0" / "hypoglycemia",
+    "run_dir": ROOT / "runs" / "mimic_targets" / "obs24_target8_gap0" / "hypoglycemia",
     "split": "test",
     "render_instance_heatmaps": False,
 }
 
 
 MIMIC_SETTINGS = {
-    "observation_hours": 24.0,
-    "prediction_hours": 6.0,
-    "hypotension_threshold": 65.0,
+    "cohort_level": "icu",
+    "windows": [
+        TargetWindowConfig(name="obs24_target8_gap0", observation_hours=24.0, prediction_hours=8.0, gap_hours=0.0),
+        TargetWindowConfig(name="obs24_target8_gap2", observation_hours=24.0, prediction_hours=8.0, gap_hours=2.0),
+    ],
+    "targets": ["hypoglycemia", "hypokalemia", "hypotension"],
+    "hypoglycemia_threshold": 70.0,
+    "hypokalemia_threshold": 3.6,
+    "hypotension_systolic_threshold": 90.0,
+    "hypotension_diastolic_threshold": 60.0,
     "chunk_size": 1_000_000,
-    "cache_dir": ROOT / "data" / "hypotension" / "mimic_cache",
+    "cache_dir": ROOT / "data" / "mimic_targets" / "cache",
     "use_extracted_files": True,
     "use_filtered_cache": True,
     "progress_interval_chunks": 1,
@@ -54,7 +62,7 @@ MIMIC_SETTINGS = {
     # quick local smoke run.
     "max_stays": None,
     "min_observations": 1,
-    "require_full_prediction_window": True,
+    "require_full_window": True,
     "require_outcome_measurement": True,
 }
 
@@ -108,16 +116,17 @@ def build_run_config() -> PipelineRunConfig:
         processed_dir=SETTINGS["processed_dir"],
         run_dir=SETTINGS["run_dir"],
     )
-    mimic_config = None
+    mimic_targets_config = None
     if SETTINGS["prepare_mimic"]:
-        mimic_config = MIMICHypotensionConfig(
-            mimic_path=SETTINGS["mimic_path"],
-            **MIMIC_SETTINGS,
-        )
+        mimic_targets_config = load_mimic_targets_config(MIMIC_CONFIG_PATH)
+        mimic_targets_config.mimic_path = SETTINGS["mimic_path"]
+        mimic_targets_config.output_dir = SETTINGS["dataset_dir"]
+        for key, value in MIMIC_SETTINGS.items():
+            setattr(mimic_targets_config, key, value)
     return PipelineRunConfig(
         paths=paths,
         config=PIPELINE_CONFIG,
-        mimic_config=mimic_config,
+        mimic_targets_config=mimic_targets_config,
         prepare_mimic=SETTINGS["prepare_mimic"],
         prepare_tensors=True,
         train=True,

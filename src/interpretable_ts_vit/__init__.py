@@ -84,28 +84,25 @@ def __getattr__(name):
             "select_patient_ids": select_patient_ids,
         }[name]
     if name in {
-        "MIMICIVHypotensionAdapter",
         "MIMICIVMultiTargetAdapter",
-        "MIMICHypotensionConfig",
         "MIMICTargetsConfig",
         "MIMICTargetWindowConfig",
+        "TargetWindowConfig",
         "load_mimic_targets_config",
     }:
         from .datasets import (
-            MIMICIVHypotensionAdapter,
             MIMICIVMultiTargetAdapter,
-            MIMICHypotensionConfig,
             MIMICTargetsConfig,
             MIMICTargetWindowConfig,
+            TargetWindowConfig,
             load_mimic_targets_config,
         )
 
         return {
-            "MIMICIVHypotensionAdapter": MIMICIVHypotensionAdapter,
             "MIMICIVMultiTargetAdapter": MIMICIVMultiTargetAdapter,
-            "MIMICHypotensionConfig": MIMICHypotensionConfig,
             "MIMICTargetsConfig": MIMICTargetsConfig,
             "MIMICTargetWindowConfig": MIMICTargetWindowConfig,
+            "TargetWindowConfig": TargetWindowConfig,
             "load_mimic_targets_config": load_mimic_targets_config,
         }[name]
     if name in {"PipelinePaths", "PipelineResult", "PipelineRunConfig", "run_pipeline"}:
@@ -117,13 +114,12 @@ def __getattr__(name):
             "PipelineRunConfig": PipelineRunConfig,
             "run_pipeline": run_pipeline,
         }[name]
-    if name in {"BaseDataModule", "GenericCSVDataModule", "MIMICHypotensionDataModule"}:
-        from .data_modules import BaseDataModule, GenericCSVDataModule, MIMICHypotensionDataModule
+    if name in {"BaseDataModule", "GenericCSVDataModule"}:
+        from .data_modules import BaseDataModule, GenericCSVDataModule
 
         return {
             "BaseDataModule": BaseDataModule,
             "GenericCSVDataModule": GenericCSVDataModule,
-            "MIMICHypotensionDataModule": MIMICHypotensionDataModule,
         }[name]
     if name == "ViTTimeSeriesModule":
         from .model_modules import ViTTimeSeriesModule
@@ -145,11 +141,10 @@ __all__ = [
     "load_config",
     "load_patient_explanation_matrix",
     "load_normal_ranges",
-    "MIMICIVHypotensionAdapter",
     "MIMICIVMultiTargetAdapter",
-    "MIMICHypotensionConfig",
     "MIMICTargetsConfig",
     "MIMICTargetWindowConfig",
+    "TargetWindowConfig",
     "load_mimic_targets_config",
     "normal_range_status_matrix",
     "patient_class_frame",
@@ -167,6 +162,5 @@ __all__ = [
     "train_model",
     "BaseDataModule",
     "GenericCSVDataModule",
-    "MIMICHypotensionDataModule",
     "ViTTimeSeriesModule",
 ]
