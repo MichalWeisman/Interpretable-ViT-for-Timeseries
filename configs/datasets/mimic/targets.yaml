@@ -114,6 +114,16 @@ target_variables:
       - 223261
       insulin_u500:
       - 229619
+      potassium_iv:
+      - 225166
+      potassium_bolus:
+      - 227522
+      potassium_crrt:
+      - 227536
+      dopamine:
+      - 221662
+      norepinephrine:
+      - 221906
       lactated_ringers:
       - 225828
   hypokalemia:
@@ -181,12 +191,49 @@ target_variables:
       temperature_f:
       - 223761
     inputevent_itemids:
+      dextrose_maintenance:
+      - 221017
+      - 220966
+      - 220963
+      - 220949
+      - 220964
+      - 220965
+      - 220967
+      - 221000
+      - 221002
+      dextrose_10:
+      - 220950
+      - 220968
+      dextrose_hypertonic:
+      - 221014
+      - 228140
+      - 220951
+      - 228141
+      - 228142
+      - 220952
+      insulin_prandial_short_acting:
+      - 223262
+      - 229299
+      - 223258
+      insulin_intermediate:
+      - 223259
+      insulin_basal_long_acting:
+      - 223260
+      insulin_premixed:
+      - 223257
+      - 223261
+      insulin_u500:
+      - 229619
       potassium_iv:
       - 225166
       potassium_bolus:
       - 227522
       potassium_crrt:
       - 227536
+      dopamine:
+      - 221662
+      norepinephrine:
+      - 221906
       lactated_ringers:
       - 225828
   hypotension:
@@ -254,6 +301,45 @@ target_variables:
       temperature_f:
       - 223761
     inputevent_itemids:
+      dextrose_maintenance:
+      - 221017
+      - 220966
+      - 220963
+      - 220949
+      - 220964
+      - 220965
+      - 220967
+      - 221000
+      - 221002
+      dextrose_10:
+      - 220950
+      - 220968
+      dextrose_hypertonic:
+      - 221014
+      - 228140
+      - 220951
+      - 228141
+      - 228142
+      - 220952
+      insulin_prandial_short_acting:
+      - 223262
+      - 229299
+      - 223258
+      insulin_intermediate:
+      - 223259
+      insulin_basal_long_acting:
+      - 223260
+      insulin_premixed:
+      - 223257
+      - 223261
+      insulin_u500:
+      - 229619
+      potassium_iv:
+      - 225166
+      potassium_bolus:
+      - 227522
+      potassium_crrt:
+      - 227536
       dopamine:
       - 221662
       norepinephrine:
