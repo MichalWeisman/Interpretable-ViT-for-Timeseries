@@ -17,7 +17,7 @@ from sklearn.model_selection import train_test_split
 from .binning import TimeSeriesBinner
 from .autoencoder import cluster_autoencoder_embeddings, create_explanation_value_embeddings, train_explanation_value_autoencoder
 from .config import Config
-from .datasets import MIMICIVMultiTargetAdapter, MIMICTargetsConfig, TargetWindowConfig, load_mimic_targets_config
+from .datasets import MIMICIVMultiTargetAdapter, MIMICTargetsConfig, TargetWindowConfig, configured_variables_for_target, load_mimic_targets_config
 from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
@@ -96,7 +96,13 @@ def run_pipeline(run_config: PipelineRunConfig | None = None) -> PipelineResult:
 
     if run_config.prepare_tensors:
         logger.info("Pipeline stage prepare_tensors started")
-        _prepare_tensor_splits(records_path, labels_path, config, paths.processed_dir)
+        _prepare_tensor_splits(
+            records_path,
+            labels_path,
+            config,
+            paths.processed_dir,
+            mimic_targets_config=run_config.mimic_targets_config if run_config.prepare_mimic else None,
+        )
         artifacts["processed_dir"] = str(Path(paths.processed_dir))
         logger.info("Pipeline stage prepare_tensors finished: processed_dir=%s", paths.processed_dir)
 
@@ -160,10 +166,27 @@ def _default_mimic_targets_config_path() -> Path:
     return Path(__file__).resolve().parents[2] / "configs" / "datasets" / "mimic" / "targets.yaml"
 
 
-def _prepare_tensor_splits(records_path: str | Path, labels_path: str | Path, config: Config, out_dir: str | Path) -> None:
+def _prepare_tensor_splits(
+    records_path: str | Path,
+    labels_path: str | Path,
+    config: Config,
+    out_dir: str | Path,
+    mimic_targets_config: MIMICTargetsConfig | None = None,
+    mimic_targets_config_path: str | Path | None = None,
+    mimic_target: str | None = None,
+    apply_mimic_yaml_filter: bool = True,
+) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     logger.info("Preparing tensor splits from records=%s labels=%s into %s", records_path, labels_path, out)
+    if apply_mimic_yaml_filter:
+        _apply_mimic_variable_filter(
+            config,
+            records_path,
+            mimic_targets_config=mimic_targets_config,
+            mimic_targets_config_path=mimic_targets_config_path,
+            mimic_target=mimic_target,
+        )
     records = pd.read_csv(records_path)
     labels = pd.read_csv(labels_path)
     logger.info("Loaded source tables for tensor preparation: records=%d, labels=%d", len(records), len(labels))
@@ -202,6 +225,66 @@ def _prepare_tensor_splits(records_path: str | Path, labels_path: str | Path, co
     with (out / "splits.json").open("w", encoding="utf-8") as fh:
         json.dump(split_ids, fh, indent=2)
     logger.info("Finished tensor preparation into %s", out)
+
+
+def _apply_mimic_variable_filter_to_config(run_config: PipelineRunConfig, records_path: str | Path, config: Config) -> None:
+    mimic_config = run_config.mimic_targets_config
+    if mimic_config is None and run_config.prepare_mimic:
+        mimic_config = _default_mimic_run_targets_config(run_config.paths)
+    _apply_mimic_variable_filter(
+        config,
+        records_path,
+        mimic_targets_config=mimic_config,
+        mimic_target=mimic_config.targets[0] if mimic_config and mimic_config.targets else None,
+    )
+
+
+def _apply_mimic_variable_filter(
+    config: Config,
+    records_path: str | Path,
+    mimic_targets_config: MIMICTargetsConfig | None = None,
+    mimic_targets_config_path: str | Path | None = None,
+    mimic_target: str | None = None,
+) -> list[str]:
+    """Set `config.data.allowed_variables` from MIMIC target YAML when applicable."""
+    target = mimic_target or _infer_mimic_target_from_records_path(records_path)
+    if target is None:
+        return []
+    mimic_config = mimic_targets_config or _load_mimic_filter_config(mimic_targets_config_path, records_path)
+    if mimic_config is None:
+        return []
+    allowed = configured_variables_for_target(mimic_config, target)
+    if not allowed:
+        if mimic_targets_config is not None or mimic_targets_config_path is not None or mimic_target is not None:
+            raise ValueError(f"No variables are configured for target {target!r}.")
+        logger.info("No YAML-configured variables found for inferred target=%s; leaving records unfiltered", target)
+        return []
+    config.data.allowed_variables = allowed
+    logger.info("Using %d YAML-configured variables for target %s during tensor preparation", len(allowed), target)
+    return allowed
+
+
+def _load_mimic_filter_config(config_path: str | Path | None, records_path: str | Path) -> MIMICTargetsConfig | None:
+    if config_path is not None:
+        return load_mimic_targets_config(config_path)
+    if not _looks_like_mimic_target_records_path(records_path):
+        return None
+    default_path = _default_mimic_targets_config_path()
+    if not default_path.exists():
+        return None
+    return load_mimic_targets_config(default_path)
+
+
+def _infer_mimic_target_from_records_path(records_path: str | Path) -> str | None:
+    path = Path(records_path)
+    if path.name == "records.csv":
+        return path.parent.name
+    return None
+
+
+def _looks_like_mimic_target_records_path(records_path: str | Path) -> bool:
+    parts = {part.lower() for part in Path(records_path).parts}
+    return "mimic_targets" in parts and Path(records_path).name == "records.csv"
 
 
 def _train_and_save(config: Config, data_dir: str | Path, run_dir: str | Path) -> dict[str, Any]:

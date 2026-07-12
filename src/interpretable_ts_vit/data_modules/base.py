@@ -10,7 +10,7 @@ from ..binning import TimeSeriesBinner
 from ..config import Config, DataConfig
 from ..data import BinnedTimeSeriesDataset
 from ..io import load_split
-from ..pipeline import _prepare_tensor_splits
+from ..pipeline import _apply_mimic_variable_filter, _prepare_tensor_splits
 
 
 logger = logging.getLogger(__name__)
@@ -25,13 +25,29 @@ class BaseDataModule:
 
     def prepare(self) -> None:
         """Prepare tensor splits under `processed_dir`."""
+        records_path, labels_path = self.input_paths()
+        config = Config(data=self.data_config)
+        _apply_mimic_variable_filter(config, records_path)
         required = [self.binner_path, *(self.split_path(split) for split in ("train", "val", "test"))]
         if all(path.exists() for path in required):
-            logger.info("Prepared tensor files already exist under %s; skipping preparation", self.processed_dir)
-            return
-        records_path, labels_path = self.input_paths()
+            allowed = set(config.data.allowed_variables or [])
+            if allowed:
+                binner = TimeSeriesBinner.load(self.binner_path)
+                extra_variables = sorted(set(binner.variable_vocab_) - allowed)
+                if extra_variables:
+                    logger.warning(
+                        "Prepared tensor files under %s contain %d variable(s) outside the YAML allow-list; rebuilding",
+                        self.processed_dir,
+                        len(extra_variables),
+                    )
+                else:
+                    logger.info("Prepared tensor files already exist under %s; skipping preparation", self.processed_dir)
+                    return
+            else:
+                logger.info("Prepared tensor files already exist under %s; skipping preparation", self.processed_dir)
+                return
         logger.info("Preparing tensor splits under %s from records=%s labels=%s", self.processed_dir, records_path, labels_path)
-        _prepare_tensor_splits(records_path, labels_path, Config(data=self.data_config), self.processed_dir)
+        _prepare_tensor_splits(records_path, labels_path, config, self.processed_dir)
         logger.info("Prepared tensor splits under %s", self.processed_dir)
 
     def load(self) -> "BaseDataModule":

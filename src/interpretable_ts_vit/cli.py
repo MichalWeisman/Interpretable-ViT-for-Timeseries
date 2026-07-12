@@ -11,7 +11,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
 from .autoencoder import cluster_autoencoder_embeddings, create_explanation_value_embeddings, train_explanation_value_autoencoder
 from .binning import TimeSeriesBinner
@@ -19,8 +18,9 @@ from .config import load_config
 from .data import BinnedTimeSeriesDataset
 from .datasets.mimic import MIMICIVMultiTargetAdapter, load_mimic_targets_config
 from .explain import explain_model
-from .io import load_model, load_split, save_metadata, save_predictions, save_split
+from .io import load_model, load_split, save_predictions
 from .model import ViTConfig, ViTTimeSeriesClassifier
+from .pipeline import _prepare_tensor_splits
 from .training import predict_model, train_model
 from .visualization import aggregate_cluster_value_matrices, cluster_assignment_counts, patient_value_matrix, plot_value_heatmap, value_ranges_by_variable
 
@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> None:
     prepare.add_argument("--labels", required=True)
     prepare.add_argument("--out", required=True)
     prepare.add_argument("--config")
+    prepare.add_argument("--mimic-targets-config", help="Optional MIMIC target YAML used to filter model variables.")
+    prepare.add_argument("--mimic-target", help="Target name within --mimic-targets-config; inferred from records path when omitted.")
 
     mimic_targets = sub.add_parser("prepare-mimic-targets")
     mimic_targets.add_argument("--config", required=True, help="YAML/JSON MIMIC-IV adapter config.")
@@ -101,44 +103,14 @@ def main(argv: list[str] | None = None) -> None:
 def cmd_prepare_data(args) -> None:
     """Split records, fit preprocessing on train only, and save `.npz` splits."""
     config = load_config(args.config)
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    logger.info("Preparing data tensors from records=%s labels=%s into %s", args.records, args.labels, out)
-    records = pd.read_csv(args.records)
-    labels = pd.read_csv(args.labels)
-    logger.info("Loaded source tables for tensor preparation: records=%d, labels=%d", len(records), len(labels))
-    patient_ids = labels[config.data.patient_id_col].astype(str).tolist()
-    y = labels[config.data.label_col].astype(str).tolist()
-    train_ids, holdout_ids, _, holdout_y = train_test_split(
-        patient_ids,
-        y,
-        test_size=config.data.val_fraction + config.data.test_fraction,
-        random_state=config.data.random_state,
-        stratify=y if len(set(y)) > 1 else None,
+    _prepare_tensor_splits(
+        args.records,
+        args.labels,
+        config,
+        args.out,
+        mimic_targets_config_path=args.mimic_targets_config,
+        mimic_target=args.mimic_target,
     )
-    relative_test = config.data.test_fraction / (config.data.val_fraction + config.data.test_fraction)
-    val_ids, test_ids = train_test_split(
-        holdout_ids,
-        test_size=relative_test,
-        random_state=config.data.random_state,
-        stratify=holdout_y if len(set(holdout_y)) > 1 else None,
-    )
-    split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
-    logger.info("Created patient splits: train=%d, val=%d, test=%d", len(train_ids), len(val_ids), len(test_ids))
-    train_labels = labels[labels[config.data.patient_id_col].astype(str).isin(train_ids)]
-    train_records = records[records[config.data.patient_id_col].astype(str).isin(train_ids)]
-    logger.info("Fitting binner on train split: records=%d, labels=%d", len(train_records), len(train_labels))
-    binner = TimeSeriesBinner(config.data).fit(train_records, train_labels)
-    for split, ids in split_ids.items():
-        split_labels = labels[labels[config.data.patient_id_col].astype(str).isin(ids)]
-        split_records = records[records[config.data.patient_id_col].astype(str).isin(ids)]
-        logger.info("Preparing %s tensor split: records=%d, labels=%d", split, len(split_records), len(split_labels))
-        binned = binner.transform(split_records, split_labels)
-        save_split(out / f"{split}.npz", binned.patient_ids, binned.x, binned.y)
-    save_metadata(out, binner)
-    with (out / "splits.json").open("w", encoding="utf-8") as fh:
-        json.dump(split_ids, fh, indent=2)
-    logger.info("Finished preparing data tensors into %s", out)
 
 
 def cmd_prepare_mimic_targets(args) -> None:

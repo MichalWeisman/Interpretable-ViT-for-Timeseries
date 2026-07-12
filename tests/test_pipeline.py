@@ -1,6 +1,8 @@
 import pandas as pd
 
 from interpretable_ts_vit.config import ClusterConfig, Config, DataConfig, ModelConfig, TrainConfig
+from interpretable_ts_vit.binning import TimeSeriesBinner
+from interpretable_ts_vit.pipeline import _prepare_tensor_splits
 from interpretable_ts_vit.pipeline import PipelinePaths, PipelineRunConfig, run_pipeline
 
 
@@ -53,3 +55,29 @@ def test_run_pipeline_without_cli_on_generic_records(tmp_path):
     assert "predicted_label" in assignments.columns
     assert any((tmp_path / "run" / "cluster_heatmaps" / "test").rglob("*.png"))
     assert "evaluation_metrics" in result.artifacts
+
+
+def test_mimic_target_tensor_preparation_infers_yaml_variable_filter(tmp_path):
+    source_dir = tmp_path / "data" / "mimic_targets" / "obs24_target8_gap0" / "hypoglycemia"
+    source_dir.mkdir(parents=True)
+    records = []
+    labels = []
+    for i in range(8):
+        patient_id = f"p{i}"
+        labels.append({"patient_id": patient_id, "label": "true" if i % 2 else "false"})
+        records.append({"patient_id": patient_id, "variable": "blood_glucose", "value": 80 + i, "timestamp": "2026-01-01 00:00:00"})
+        records.append({"patient_id": patient_id, "variable": "not_in_yaml", "value": 1.0, "timestamp": "2026-01-01 00:00:00"})
+    records_path = source_dir / "records.csv"
+    labels_path = source_dir / "labels.csv"
+    pd.DataFrame(records).to_csv(records_path, index=False)
+    pd.DataFrame(labels).to_csv(labels_path, index=False)
+
+    _prepare_tensor_splits(
+        records_path,
+        labels_path,
+        Config(data=DataConfig(granularity="1h", time_start="2026-01-01", time_end="2026-01-02")),
+        tmp_path / "processed",
+    )
+
+    binner = TimeSeriesBinner.load(tmp_path / "processed" / "binner.json")
+    assert binner.variable_vocab_ == ["blood_glucose"]
