@@ -200,7 +200,7 @@ def _labels(prepared):
     return prepared.labels.set_index("patient_id")["label"].to_dict()
 
 
-def test_multi_target_adapter_builds_each_target_and_excludes_prior_positives(tmp_path):
+def test_multi_target_adapter_builds_each_target_and_keeps_prior_hypoglycemia_and_hypokalemia(tmp_path):
     zip_path = _mini_mimic_zip(tmp_path)
     datasets = MIMICIVMultiTargetAdapter(_config(zip_path, tmp_path)).prepare_all()
 
@@ -209,10 +209,10 @@ def test_multi_target_adapter_builds_each_target_and_excludes_prior_positives(tm
     assert "12" not in _labels(datasets[("wide", "cardiovascular_event")])
     assert _labels(datasets[("wide", "hypoglycemia")])["20"] == "true"
     assert _labels(datasets[("wide", "hypoglycemia")])["21"] == "false"
-    assert "22" not in _labels(datasets[("wide", "hypoglycemia")])
+    assert _labels(datasets[("wide", "hypoglycemia")])["22"] == "true"
     assert _labels(datasets[("wide", "hypokalemia")])["20"] == "true"
     assert _labels(datasets[("wide", "hypokalemia")])["21"] == "false"
-    assert "22" not in _labels(datasets[("wide", "hypokalemia")])
+    assert _labels(datasets[("wide", "hypokalemia")])["22"] == "true"
     assert _labels(datasets[("wide", "in_hospital_mortality")])["30"] == "true"
     assert _labels(datasets[("wide", "in_hospital_mortality")])["31"] == "false"
     assert "32" not in _labels(datasets[("wide", "in_hospital_mortality")])
@@ -231,7 +231,7 @@ def test_mimic_target_windows_support_optional_gap(tmp_path):
     datasets = MIMICIVMultiTargetAdapter(_config(zip_path, tmp_path, windows=windows, targets=["hypoglycemia"])).prepare_all()
 
     assert _labels(datasets[("gap0", "hypoglycemia")])["20"] == "true"
-    assert "20" not in _labels(datasets[("gap8", "hypoglycemia")])
+    assert _labels(datasets[("gap8", "hypoglycemia")])["20"] == "false"
 
 
 def test_mimic_target_records_standardize_units_and_event_variables(tmp_path):
@@ -399,6 +399,17 @@ def test_hypotension_target_labels_icu_prediction_window(tmp_path):
     assert labels["100"] == "true"
     assert labels["110"] == "false"
     assert labels["120"] == "false"
+
+
+def test_icu_lab_targets_attach_admission_level_events_to_stays(tmp_path):
+    zip_path = _mini_mimic_zip(tmp_path)
+    dataset = MIMICIVMultiTargetAdapter(_config(zip_path, tmp_path, targets=["hypoglycemia"], cohort_level="icu")).prepare_all()[("wide", "hypoglycemia")]
+    labels = _labels(dataset)
+
+    assert labels["200"] == "true"
+    assert labels["210"] == "false"
+    assert "stay_id_x" not in dataset.records.columns
+    assert "stay_id_y" not in dataset.records.columns
 
 
 def test_hypotension_requires_icu_cohort_level(tmp_path):

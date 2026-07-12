@@ -5,7 +5,8 @@ cohort_level: icu
 chunk_size: 1000000
 use_extracted_files: true
 use_filtered_cache: true
-require_full_window: true
+require_full_window: false
+require_outcome_measurement: false
 min_observations: 1
 targets:
 - hypoglycemia

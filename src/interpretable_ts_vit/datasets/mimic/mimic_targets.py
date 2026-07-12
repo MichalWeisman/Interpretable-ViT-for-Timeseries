@@ -86,7 +86,7 @@ class MIMICTargetsConfig:
     chunk_size: int = 1_000_000
     use_extracted_files: bool = True
     use_filtered_cache: bool = True
-    require_full_window: bool = True
+    require_full_window: bool = False
     min_observations: int = 1
     relative_time_anchor: str = "2000-01-01 00:00:00"
     fever_threshold_celsius: float = 37.8
@@ -108,7 +108,7 @@ class MIMICTargetsConfig:
     progress_interval_chunks: int = 1
     max_admissions: int | None = None
     max_stays: int | None = None
-    require_outcome_measurement: bool = True
+    require_outcome_measurement: bool = False
 
 
 class MIMICIVMultiTargetAdapter:
@@ -232,7 +232,7 @@ class MIMICIVMultiTargetAdapter:
         if self.config.require_full_window:
             cohort = cohort[cohort[end_col] >= cohort["prediction_end"]]
         else:
-            cohort = cohort[cohort[end_col] > cohort["observation_end"]].copy()
+            cohort = cohort[cohort[end_col] >= cohort["observation_end"]].copy()
             cohort["prediction_end"] = cohort[["prediction_end", end_col]].min(axis=1)
         return cohort
 
@@ -573,6 +573,7 @@ class MIMICIVMultiTargetAdapter:
                 "blood_glucose",
                 self.config.hypoglycemia_threshold,
                 op="<",
+                exclude_prior=False,
                 definition=f"Glucose < {self.config.hypoglycemia_threshold} mg/dL in prediction window",
             )
         if target == "hypokalemia":
@@ -581,6 +582,7 @@ class MIMICIVMultiTargetAdapter:
                 "potassium",
                 self.config.hypokalemia_threshold,
                 op="<",
+                exclude_prior=False,
                 definition=f"Potassium < {self.config.hypokalemia_threshold} mmol/L in prediction window",
             )
         if target == "prolonged_hyperglycemia":
@@ -600,6 +602,7 @@ class MIMICIVMultiTargetAdapter:
         threshold: float,
         *,
         op: str,
+        exclude_prior: bool = True,
         definition: str,
     ) -> tuple[pd.DataFrame, dict[str, Any]]:
         itemids = set(inputs.lab_itemids.get(variable, [])) | set(inputs.chart_itemids.get(variable, []))
@@ -609,7 +612,7 @@ class MIMICIVMultiTargetAdapter:
         events = self._attach_window(events, inputs.cohort)
         abnormal = events[pd.to_numeric(events["valuenum"], errors="coerce").map(lambda value: _compare(value, threshold, op))]
         id_col = self._cohort_id_col()
-        prior = set(abnormal.loc[abnormal["charttime"] < abnormal["prediction_start"], id_col].astype(int))
+        prior = set(abnormal.loc[abnormal["charttime"] < abnormal["prediction_start"], id_col].astype(int)) if exclude_prior else set()
         positive = set(
             abnormal.loc[
                 (abnormal["charttime"] >= abnormal["prediction_start"])
@@ -795,10 +798,11 @@ class MIMICIVMultiTargetAdapter:
         events = self._attach_window(events, inputs.cohort)
         events["value"] = pd.to_numeric(events["valuenum"], errors="coerce")
         outcome = events[(events["charttime"] >= events["prediction_start"]) & (events["charttime"] < events["prediction_end"])]
-        measured = set(outcome["stay_id"].astype(int))
+        id_col = self._cohort_id_col()
+        measured = set(outcome[id_col].astype(int))
         systolic_low = outcome["itemid"].isin(systolic_itemids) & (outcome["value"] < self.config.hypotension_systolic_threshold)
         diastolic_low = outcome["itemid"].isin(diastolic_itemids) & (outcome["value"] < self.config.hypotension_diastolic_threshold)
-        positive = set(outcome.loc[systolic_low | diastolic_low, "stay_id"].astype(int))
+        positive = set(outcome.loc[systolic_low | diastolic_low, id_col].astype(int))
         return self._labels_from_outcomes(inputs.cohort, positive, measured, definition)
 
     def _labels_from_sets(
@@ -874,6 +878,7 @@ class MIMICIVMultiTargetAdapter:
                 frames.append(direct)
             indirect = events[events["stay_id"].isna()].copy()
             if not indirect.empty:
+                indirect = indirect.drop(columns=["stay_id"])
                 join_cols = [self._cohort_id_col(), "hadm_id", start_col, "observation_end", "prediction_start", "prediction_end"]
                 cohort_join = cohort.reset_index()[list(dict.fromkeys(join_cols))]
                 indirect = indirect.merge(cohort_join, on="hadm_id", how="inner")
