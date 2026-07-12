@@ -1064,6 +1064,24 @@ def load_mimic_targets_config(path: str | Path) -> MIMICTargetsConfig:
     return MIMICTargetsConfig(**raw)
 
 
+def configured_variables_for_target(config: MIMICTargetsConfig, target: str) -> list[str]:
+    """Return model variables explicitly configured for a MIMIC target.
+
+    This intentionally reflects the YAML mappings rather than variables found
+    in an already-generated records file, so removing a variable from the YAML
+    also removes it from later tensor/model preparation.
+    """
+    raw = config.target_variables.get(target, MIMICTargetVariableConfig())
+    if not isinstance(raw, MIMICTargetVariableConfig):
+        raw = MIMICTargetVariableConfig(**(raw or {}))
+    variables: set[str] = set()
+    variables.update((raw.lab_itemids or config.lab_itemids).keys())
+    variables.update(_canonical_chart_variable(variable) for variable in (raw.chart_itemids or config.chart_itemids))
+    variables.update((raw.inputevent_itemids or config.inputevent_itemids).keys())
+    variables.update((raw.drug_regexes or config.drug_regexes).keys())
+    return sorted(str(variable) for variable in variables)
+
+
 def _match_patterns(text: pd.Series, patterns: list[str]) -> pd.Series:
     if not patterns:
         return pd.Series(False, index=text.index)

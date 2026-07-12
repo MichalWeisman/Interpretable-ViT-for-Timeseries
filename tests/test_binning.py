@@ -46,6 +46,30 @@ def test_unknown_variables_do_not_change_shape():
     assert np.all(out.x == 0)
 
 
+def test_allowed_variables_filter_final_model_vocab():
+    records = pd.DataFrame(
+        [
+            ["p1", "hr", 80.0, "2026-01-01 00:00:00"],
+            ["p1", "bp", 120.0, "2026-01-01 00:00:00"],
+            ["p2", "hr", 70.0, "2026-01-01 00:00:00"],
+            ["p2", "bp", 110.0, "2026-01-01 00:00:00"],
+        ],
+        columns=["patient_id", "variable", "value", "timestamp"],
+    )
+    labels = pd.DataFrame({"patient_id": ["p1", "p2"], "label": ["case", "control"]})
+
+    binner = TimeSeriesBinner(
+        granularity="1h",
+        time_start="2026-01-01",
+        time_end="2026-01-02",
+        allowed_variables=["hr"],
+    ).fit(records, labels)
+    out = binner.transform(records, labels)
+
+    assert binner.variable_vocab_ == ["hr"]
+    assert out.x.shape == (2, 2, 1, 24)
+
+
 def test_unseen_label_fails_clearly():
     records = pd.DataFrame(
         [["p1", "hr", 80.0, "2026-01-01"]],

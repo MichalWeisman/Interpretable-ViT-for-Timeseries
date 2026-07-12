@@ -11,6 +11,7 @@ from interpretable_ts_vit.datasets.mimic import (
     MIMICIVMultiTargetAdapter,
     MIMICTargetVariableConfig,
     MIMICTargetsConfig,
+    configured_variables_for_target,
     load_mimic_targets_config,
 )
 from interpretable_ts_vit.cli import main as cli_main
@@ -282,6 +283,24 @@ def test_target_variables_scope_records_per_target(tmp_path):
     assert "blood_glucose" not in set(datasets[("wide", "hypokalemia")].records["variable"])
     assert datasets[("wide", "hypoglycemia")].metadata["variable_mappings"]["lab_itemids"] == {"blood_glucose": [1001]}
     assert datasets[("wide", "hypokalemia")].metadata["variable_mappings"]["lab_itemids"] == {"potassium": [1011]}
+
+
+def test_configured_variables_for_target_reflects_yaml_mappings(tmp_path):
+    zip_path = _mini_mimic_zip(tmp_path)
+    config = _config(zip_path, tmp_path, targets=["hypoglycemia"])
+    config.lab_itemids = {}
+    config.chart_itemids = {}
+    config.inputevent_itemids = {}
+    config.drug_regexes = {}
+    config.target_variables = {
+        "hypoglycemia": MIMICTargetVariableConfig(
+            lab_itemids={"blood_glucose": [1001]},
+            chart_itemids={"temperature_f": [223761]},
+            inputevent_itemids={"dextrose_10": [300001]},
+        )
+    }
+
+    assert configured_variables_for_target(config, "hypoglycemia") == ["blood_glucose", "dextrose_10", "temperature"]
 
 
 def test_prepare_mimic_targets_endpoint_outputs_only_pre_tensor_files(tmp_path):

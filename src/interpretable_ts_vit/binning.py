@@ -59,6 +59,7 @@ class TimeSeriesBinner:
         logger.info("Fitting time-series binner")
         records_df = self._read_table(records)
         records_df = self._prepare_records(records_df)
+        records_df = self._filter_allowed_variables(records_df)
         logger.info(
             "Prepared records for binner fit: rows=%d, patients=%d",
             len(records_df),
@@ -100,6 +101,7 @@ class TimeSeriesBinner:
             raise RuntimeError("TimeSeriesBinner must be fitted before transform.")
         logger.info("Transforming records into binned tensors")
         records_df = self._prepare_records(self._read_table(records))
+        records_df = self._filter_allowed_variables(records_df)
         labels_df = self._prepare_labels(labels) if labels is not None else None
         if labels_df is not None:
             patient_ids = labels_df[self.config.patient_id_col].astype(str).tolist()
@@ -224,6 +226,22 @@ class TimeSeriesBinner:
         out[self.config.timestamp_col] = pd.to_datetime(out[self.config.timestamp_col])
         if getattr(out[self.config.timestamp_col].dt, "tz", None) is not None:
             out[self.config.timestamp_col] = out[self.config.timestamp_col].dt.tz_convert(None)
+        return out
+
+    def _filter_allowed_variables(self, records: pd.DataFrame) -> pd.DataFrame:
+        allowed = self.config.allowed_variables
+        if allowed is None:
+            return records
+        allowed_set = {str(variable) for variable in allowed}
+        out = records[records[self.config.variable_col].astype(str).isin(allowed_set)].copy()
+        logger.info(
+            "Filtered records by allowed_variables: input_rows=%d, output_rows=%d, allowed_variables=%d",
+            len(records),
+            len(out),
+            len(allowed_set),
+        )
+        if out.empty:
+            raise ValueError("No records remain after filtering by allowed_variables.")
         return out
 
     def _prepare_labels(self, labels: pd.DataFrame | dict | str | Path) -> pd.DataFrame:

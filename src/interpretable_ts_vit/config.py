@@ -21,6 +21,7 @@ class DataConfig:
     time_start: str | None = None
     time_end: str | None = None
     aggregation: str = "mean"
+    allowed_variables: list[str] | None = None
     val_fraction: float = 0.2
     test_fraction: float = 0.2
     random_state: int = 13
