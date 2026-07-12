@@ -7,6 +7,7 @@ __pycache__/
 build/
 dist/
 runs/
+data/
 data/processed/
 data/mimic_hypotension/
 data/mimic_cache/
