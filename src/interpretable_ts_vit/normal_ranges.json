@@ -191,6 +191,18 @@
     "unit": "event",
     "note": "Medication/input exposure event indicator."
   },
+  "dextrose_hypertonic": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Hypertonic dextrose input exposure event indicator."
+  },
+  "dextrose_maintenance": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Maintenance dextrose input exposure event indicator."
+  },
   "previous_dextrose_treatment": {
     "low": 0,
     "high": 1,
@@ -215,11 +227,23 @@
     "unit": "event",
     "note": "Medication/input exposure event indicator."
   },
+  "dopamine": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Vasopressor exposure event indicator."
+  },
   "previous_norepinephrine_treatment": {
     "low": 0,
     "high": 1,
     "unit": "event",
     "note": "Medication/input exposure event indicator."
+  },
+  "norepinephrine": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Vasopressor exposure event indicator."
   },
   "previous_fluids_given": {
     "low": 0,
@@ -245,6 +269,24 @@
     "unit": "event",
     "note": "Insulin exposure event indicator."
   },
+  "insulin_intermediate": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Insulin exposure event indicator."
+  },
+  "insulin_basal_long_acting": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Basal long-acting insulin exposure event indicator."
+  },
+  "insulin_prandial_short_acting": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Prandial short-acting insulin exposure event indicator."
+  },
   "insulin_long_acting": {
     "low": 0,
     "high": 1,
@@ -262,6 +304,36 @@
     "high": 1,
     "unit": "event",
     "note": "Insulin exposure event indicator."
+  },
+  "insulin_u500": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "U-500 insulin exposure event indicator."
+  },
+  "lactated_ringers": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Fluid input exposure event indicator."
+  },
+  "potassium_bolus": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Potassium bolus exposure event indicator."
+  },
+  "potassium_crrt": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Potassium CRRT exposure event indicator."
+  },
+  "potassium_iv": {
+    "low": 0,
+    "high": 1,
+    "unit": "event",
+    "note": "Intravenous potassium exposure event indicator."
   },
   "metformin": {
     "low": 0,
