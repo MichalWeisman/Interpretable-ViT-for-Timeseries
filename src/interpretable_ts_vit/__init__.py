@@ -114,6 +114,13 @@ def __getattr__(name):
             "PipelineRunConfig": PipelineRunConfig,
             "run_pipeline": run_pipeline,
         }[name]
+    if name in {"ExperimentReportSpec", "build_experiment_report"}:
+        from .reporting import ExperimentReportSpec, build_experiment_report
+
+        return {
+            "ExperimentReportSpec": ExperimentReportSpec,
+            "build_experiment_report": build_experiment_report,
+        }[name]
     if name in {"BaseDataModule", "GenericCSVDataModule"}:
         from .data_modules import BaseDataModule, GenericCSVDataModule
 

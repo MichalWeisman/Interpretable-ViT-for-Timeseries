@@ -1,10 +1,12 @@
 import numpy as np
+import pandas as pd
 import torch
 
 from interpretable_ts_vit import ViTConfig, ViTTimeSeriesClassifier, explain_model
 from interpretable_ts_vit.autoencoder import cluster_explanation_value_autoencoder
 from interpretable_ts_vit.config import TrainConfig
 from interpretable_ts_vit.data import BinnedTimeSeriesDataset
+from interpretable_ts_vit.io import save_predictions
 from interpretable_ts_vit.training import evaluate_model, train_model
 
 
@@ -51,6 +53,25 @@ def test_evaluation_reports_binary_confusion_rates_and_auc():
     assert metrics["tnr"] == 0.5
     assert metrics["fnr"] == 0.5
     assert metrics["ppv"] == 0.5
+
+
+def test_binary_evaluation_and_prediction_export_use_tuned_threshold(tmp_path):
+    x = np.zeros((4, 2, 1, 1), dtype="float32")
+    y = np.array([0, 0, 1, 1])
+    ds = BinnedTimeSeriesDataset(x, y, [f"p{i}" for i in range(4)])
+    model = ScoreModel()
+    model.decision_threshold_ = 0.3
+
+    metrics = evaluate_model(model, ds, TrainConfig(device="cpu", batch_size=4))
+
+    assert metrics["decision_threshold"] == 0.3
+    assert metrics["confusion_matrix"] == [[0, 2], [0, 2]]
+    logits = np.array([[0.0, -1.0], [0.0, -0.5], [0.0, -0.25], [0.0, 0.25]], dtype="float32")
+    save_predictions(tmp_path / "predictions.csv", ["a", "b", "c", "d"], logits, ["False", "True"], decision_threshold=0.5)
+    frame = pd.read_csv(tmp_path / "predictions.csv")
+    assert "decision_threshold" in frame.columns
+    assert frame["decision_threshold"].unique().tolist() == [0.5]
+    assert frame["predicted_label"].astype(str).tolist() == ["False", "False", "False", "True"]
 
 
 def test_explanation_supports_progress_toggle():

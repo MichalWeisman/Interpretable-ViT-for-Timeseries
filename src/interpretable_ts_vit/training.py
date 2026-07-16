@@ -9,7 +9,9 @@ from typing import Any
 
 import numpy as np
 import torch
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score
+from sklearn.model_selection import TunedThresholdClassifierCV
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -18,6 +20,20 @@ from .data import BinnedTimeSeriesDataset
 
 
 logger = logging.getLogger(__name__)
+
+
+class _PrecomputedProbabilityClassifier(ClassifierMixin, BaseEstimator):
+    """Tiny sklearn adapter used to tune a threshold on fixed model probabilities."""
+
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        self.classes_ = np.array([0, 1])
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        return np.asarray(X, dtype=np.float64)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self.classes_[np.asarray(X).argmax(axis=1)]
 
 
 def resolve_device(device: str) -> torch.device:
@@ -47,14 +63,20 @@ def train_model(
         device,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    criterion = nn.CrossEntropyLoss()
+    verbose = bool(getattr(config, "verbose", True))
+    class_weights = _class_weights_from_dataset(train_dataset)
+    if class_weights is not None:
+        logger.info("Using weighted cross entropy with class_weights=%s", class_weights.detach().cpu().numpy().tolist())
+        if verbose:
+            print(f"Using weighted cross entropy with class_weights={class_weights.detach().cpu().numpy().round(6).tolist()}", flush=True)
+        class_weights = class_weights.to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     history: list[dict[str, float]] = []
     early_stopping_patience = getattr(config, "early_stopping_patience", None)
     monitor = getattr(config, "early_stopping_monitor", "val_loss")
     min_delta = float(getattr(config, "early_stopping_min_delta", 0.0))
     mode = _resolve_monitor_mode(monitor, getattr(config, "early_stopping_mode", "auto"))
     restore_best_model = bool(getattr(config, "restore_best_model", True))
-    verbose = bool(getattr(config, "verbose", True))
     progress_interval_batches = getattr(config, "progress_interval_batches", 50)
     best_value: float | None = None
     best_epoch: int | None = None
@@ -112,7 +134,14 @@ def train_model(
     if restore_best_model and best_state is not None:
         model.load_state_dict(best_state)
         model.to(device)
+    threshold_metadata = tune_binary_decision_threshold(model, val_dataset, config) if val_dataset is not None else None
+    if threshold_metadata is not None:
+        setattr(model, "decision_threshold_", threshold_metadata["threshold"])
     metrics = evaluate_model(model, val_dataset or train_dataset, config)
+    if threshold_metadata is not None:
+        metrics["decision_threshold"] = threshold_metadata
+    if class_weights is not None:
+        metrics["class_weights"] = class_weights.detach().cpu().numpy().tolist()
     metrics["history"] = history
     metrics["epochs_ran"] = len(history)
     metrics["stopped_early"] = len(history) < config.epochs
@@ -123,7 +152,10 @@ def train_model(
     if output_dir is not None:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
-        torch.save({"model_state_dict": model.state_dict(), "config": model.config.__dict__}, out / "model.pt")
+        checkpoint = {"model_state_dict": model.state_dict(), "config": model.config.__dict__}
+        if threshold_metadata is not None:
+            checkpoint["decision_threshold"] = threshold_metadata
+        torch.save(checkpoint, out / "model.pt")
         with (out / "metrics.json").open("w", encoding="utf-8") as fh:
             json.dump(_jsonable(metrics), fh, indent=2)
     return metrics
@@ -194,15 +226,18 @@ def predict_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: Tr
 def evaluate_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: TrainConfig | None = None) -> dict[str, Any]:
     """Compute classification metrics and confusion-derived binary rates."""
     logits, y_true = predict_model(model, dataset, config)
-    y_pred = logits.argmax(axis=1)
     n_classes = int(logits.shape[1])
+    probs = torch.softmax(torch.as_tensor(logits), dim=1).numpy()
+    threshold = getattr(model, "decision_threshold_", None)
+    y_pred = predict_labels_from_probabilities(probs, threshold=threshold)
     metrics: dict[str, Any] = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
         "confusion_matrix": confusion_matrix(y_true, y_pred, labels=np.arange(n_classes)).tolist(),
     }
+    if threshold is not None and n_classes == 2:
+        metrics["decision_threshold"] = float(threshold)
     try:
-        probs = torch.softmax(torch.as_tensor(logits), dim=1).numpy()
         if n_classes == 2:
             metrics["auc"] = float(roc_auc_score(y_true, probs[:, 1]))
         else:
@@ -212,6 +247,104 @@ def evaluate_model(model: nn.Module, dataset: BinnedTimeSeriesDataset, config: T
     metrics["auroc"] = metrics["auc"]
     metrics.update(_binary_confusion_metrics(y_true, y_pred, n_classes))
     return metrics
+
+
+def predict_labels_from_probabilities(probs: np.ndarray, threshold: float | None = None) -> np.ndarray:
+    """Convert class probabilities to labels, using a tuned binary threshold when present."""
+    probs = np.asarray(probs)
+    if threshold is not None and probs.ndim == 2 and probs.shape[1] == 2:
+        return (probs[:, 1] >= float(threshold)).astype(int)
+    return probs.argmax(axis=1)
+
+
+def tune_binary_decision_threshold(
+    model: nn.Module,
+    validation_dataset: BinnedTimeSeriesDataset | None,
+    config: TrainConfig | None = None,
+) -> dict[str, Any] | None:
+    """Tune the binary positive-class probability threshold on validation data."""
+    if validation_dataset is None or validation_dataset.y is None:
+        return None
+    logits, y_true = predict_model(model, validation_dataset, config)
+    if logits.ndim != 2 or logits.shape[1] != 2 or len(np.unique(y_true)) != 2:
+        return None
+    probs = torch.softmax(torch.as_tensor(logits), dim=1).numpy()
+    estimator = _PrecomputedProbabilityClassifier().fit(probs, y_true)
+    tuner = TunedThresholdClassifierCV(
+        estimator,
+        scoring="balanced_accuracy",
+        response_method="predict_proba",
+        cv="prefit",
+        refit=False,
+        store_cv_results=True,
+    )
+    tuner.fit(probs, y_true)
+    threshold = float(tuner.best_threshold_)
+    metadata = {
+        "threshold": threshold,
+        "scoring": "balanced_accuracy",
+        "best_score": float(tuner.best_score_),
+        "source_split": "val",
+        "method": "TunedThresholdClassifierCV",
+    }
+    logger.info(
+        "Tuned binary decision threshold with TunedThresholdClassifierCV: threshold=%.6f best_score=%.6f",
+        threshold,
+        metadata["best_score"],
+    )
+    print(
+        "Tuned binary decision threshold with TunedThresholdClassifierCV: "
+        f"threshold={threshold:.6f}, balanced_accuracy={metadata['best_score']:.6f}",
+        flush=True,
+    )
+    return metadata
+
+
+def class_balance(dataset: BinnedTimeSeriesDataset, label_names: list[str] | None = None) -> list[dict[str, Any]]:
+    """Return count and prevalence by class for a labeled dataset."""
+    if dataset.y is None:
+        return []
+    y = dataset.y.detach().cpu().numpy()
+    values, counts = np.unique(y, return_counts=True)
+    total = int(len(y))
+    rows = []
+    for value, count in zip(values, counts):
+        index = int(value)
+        label = label_names[index] if label_names is not None and index < len(label_names) else str(index)
+        rows.append({"class_index": index, "label": label, "count": int(count), "prevalence": float(count / total)})
+    return rows
+
+
+def format_class_balance(name: str, dataset: BinnedTimeSeriesDataset, label_names: list[str] | None = None) -> str:
+    """Format class-balance counts for logs and notebooks."""
+    rows = class_balance(dataset, label_names)
+    if not rows:
+        return f"{name} class balance: labels unavailable"
+    total = sum(row["count"] for row in rows)
+    parts = [f"{row['label']}={row['count']} ({row['prevalence']:.2%})" for row in rows]
+    return f"{name} class balance: n={total}, " + ", ".join(parts)
+
+
+def print_class_balance(name: str, dataset: BinnedTimeSeriesDataset, label_names: list[str] | None = None) -> None:
+    """Print and log class balance for a split."""
+    message = format_class_balance(name, dataset, label_names)
+    logger.info(message)
+    print(message, flush=True)
+
+
+def _class_weights_from_dataset(dataset: BinnedTimeSeriesDataset) -> torch.Tensor | None:
+    if dataset.y is None:
+        return None
+    y = dataset.y.detach().cpu().numpy()
+    classes, counts = np.unique(y, return_counts=True)
+    if len(classes) < 2:
+        return None
+    n_classes = int(classes.max()) + 1
+    weights = np.ones(n_classes, dtype=np.float32)
+    total = float(len(y))
+    for cls, count in zip(classes, counts):
+        weights[int(cls)] = total / (len(classes) * float(count))
+    return torch.as_tensor(weights, dtype=torch.float32)
 
 
 def _binary_confusion_metrics(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> dict[str, float | None]:

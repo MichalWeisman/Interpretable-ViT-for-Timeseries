@@ -11,6 +11,7 @@ from ..config import Config, DataConfig
 from ..data import BinnedTimeSeriesDataset
 from ..io import load_split
 from ..pipeline import _apply_mimic_variable_filter, _prepare_tensor_splits
+from ..training import print_class_balance
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,12 @@ class BaseDataModule:
         logger.info("Loading data module metadata from %s", self.binner_path)
         self._binner = TimeSeriesBinner.load(self.binner_path)
         logger.info("Loaded data module metadata from %s", self.binner_path)
+        if not getattr(self, "_class_balance_printed", False):
+            for split in ("train", "val", "test"):
+                split_path = self.split_path(split)
+                if split_path.exists():
+                    print_class_balance(split, load_split(split_path), self.label_names)
+            self._class_balance_printed = True
         return self
 
     def split(self, name: str) -> BinnedTimeSeriesDataset:

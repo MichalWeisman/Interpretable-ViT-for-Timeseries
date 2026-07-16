@@ -21,7 +21,8 @@ from .explain import explain_model
 from .io import load_model, load_split, save_predictions
 from .model import ViTConfig, ViTTimeSeriesClassifier
 from .pipeline import _prepare_tensor_splits
-from .training import predict_model, train_model
+from .reporting import ExperimentReportSpec, build_experiment_report, discover_experiment_specs
+from .training import print_class_balance, predict_model, train_model
 from .visualization import aggregate_cluster_value_matrices, cluster_assignment_counts, patient_value_matrix, plot_value_heatmap, value_ranges_by_variable
 
 
@@ -83,6 +84,17 @@ def main(argv: list[str] | None = None) -> None:
     plot.add_argument("--use-normal-ranges", action="store_true", help="Color values as low/normal/high using normal ranges.")
     plot.add_argument("--normal-ranges", help="Path to a JSON file of normal ranges.")
 
+    report = sub.add_parser("report")
+    report.add_argument("--run", action="append", help="Run directory to include. Repeat for comparison reports.")
+    report.add_argument("--runs-root", help="Parent directory; all complete runs below it are included.")
+    report.add_argument("--dataset-root", help="Dataset root used to infer dataset metadata for runs discovered via --runs-root.")
+    report.add_argument("--dataset-dir", action="append", help="Prepared dataset directory for the corresponding --run. Repeat in the same order.")
+    report.add_argument("--name", action="append", help="Optional display name for the corresponding --run. Repeat in the same order.")
+    report.add_argument("--out", required=True, help="Output self-contained HTML file.")
+    report.add_argument("--split", default="test")
+    report.add_argument("--top-importance-fraction", type=float, default=0.10)
+    report.add_argument("--mimic-path", help="Optional MIMIC-IV zip or extracted root used to resolve item names.")
+
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logger.info("Running command %s", args.command)
@@ -98,6 +110,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_cluster(args)
     elif args.command == "plot":
         cmd_plot(args)
+    elif args.command == "report":
+        cmd_report(args)
 
 
 def cmd_prepare_data(args) -> None:
@@ -137,6 +151,11 @@ def cmd_train(args) -> None:
     train_ds = load_split(data_dir / "train.npz")
     val_ds = load_split(data_dir / "val.npz")
     binner = TimeSeriesBinner.load(data_dir / "binner.json")
+    print_class_balance("train", train_ds, binner.index_to_label_)
+    print_class_balance("val", val_ds, binner.index_to_label_)
+    test_path = data_dir / "test.npz"
+    if test_path.exists():
+        print_class_balance("test", load_split(test_path), binner.index_to_label_)
     x_shape = train_ds.x.shape
     model_config = ViTConfig(
         **config.model.__dict__,
@@ -152,11 +171,16 @@ def cmd_train(args) -> None:
     for split in ["train", "val", "test"]:
         if (data_dir / f"{split}.npz").exists():
             shutil.copyfile(data_dir / f"{split}.npz", out / f"{split}.npz")
-    test_path = data_dir / "test.npz"
     if test_path.exists():
         test_ds = load_split(test_path)
         logits, _ = predict_model(model, test_ds, config.train)
-        save_predictions(out / "predictions.csv", test_ds.patient_ids or [], logits, binner.index_to_label_)
+        save_predictions(
+            out / "predictions.csv",
+            test_ds.patient_ids or [],
+            logits,
+            binner.index_to_label_,
+            decision_threshold=getattr(model, "decision_threshold_", None),
+        )
     with (out / "metrics.json").open("w", encoding="utf-8") as fh:
         json.dump(metrics, fh, indent=2)
 
@@ -306,6 +330,43 @@ def cmd_plot(args) -> None:
                     show_values=True,
                     normal_ranges=normal_ranges,
                 )
+
+
+def cmd_report(args) -> None:
+    """Build a self-contained static HTML experiment report."""
+    explicit_runs = args.run or []
+    if not explicit_runs and args.runs_root is None:
+        raise SystemExit("Provide at least one --run or a --runs-root.")
+    if args.dataset_dir is not None and len(args.dataset_dir) != len(explicit_runs):
+        raise SystemExit("--dataset-dir must be repeated once per --run when provided.")
+    if args.name is not None and len(args.name) != len(explicit_runs):
+        raise SystemExit("--name must be repeated once per --run when provided.")
+    specs = [
+        ExperimentReportSpec(
+            run_dir=run,
+            dataset_dir=None if args.dataset_dir is None else args.dataset_dir[index],
+            name=None if args.name is None else args.name[index],
+        )
+        for index, run in enumerate(explicit_runs)
+    ]
+    if args.runs_root is not None:
+        specs.extend(
+            discover_experiment_specs(
+                args.runs_root,
+                dataset_root=args.dataset_root,
+                split=args.split,
+            )
+        )
+    if not specs:
+        raise SystemExit("No reportable runs found.")
+    build_experiment_report(
+        specs,
+        args.out,
+        split=args.split,
+        top_importance_fraction=args.top_importance_fraction,
+        mimic_path=args.mimic_path,
+    )
+    logger.info("Wrote experiment report to %s", args.out)
 
 
 def _plot_embedding_centroids(

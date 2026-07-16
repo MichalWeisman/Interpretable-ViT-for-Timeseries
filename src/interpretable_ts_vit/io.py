@@ -13,6 +13,7 @@ import torch
 from .binning import TimeSeriesBinner
 from .data import BinnedTimeSeriesDataset
 from .model import ViTConfig, ViTTimeSeriesClassifier
+from .training import predict_labels_from_probabilities
 
 
 logger = logging.getLogger(__name__)
@@ -41,11 +42,19 @@ def load_split(path: str | Path) -> BinnedTimeSeriesDataset:
     return dataset
 
 
-def save_predictions(path: str | Path, patient_ids: list[str], logits: np.ndarray, label_names: list[str]) -> None:
+def save_predictions(
+    path: str | Path,
+    patient_ids: list[str],
+    logits: np.ndarray,
+    label_names: list[str],
+    decision_threshold: float | None = None,
+) -> None:
     """Save predicted labels and class probabilities as CSV."""
     probs = torch.softmax(torch.as_tensor(logits), dim=1).numpy()
-    pred = probs.argmax(axis=1)
+    pred = predict_labels_from_probabilities(probs, threshold=decision_threshold)
     frame = pd.DataFrame({"patient_id": patient_ids, "predicted_label": [label_names[i] for i in pred]})
+    if decision_threshold is not None and len(label_names) == 2:
+        frame["decision_threshold"] = float(decision_threshold)
     for idx, label in enumerate(label_names):
         frame[f"prob_{label}"] = probs[:, idx]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -57,6 +66,9 @@ def load_model(run_dir: str | Path) -> ViTTimeSeriesClassifier:
     checkpoint = torch.load(Path(run_dir) / "model.pt", map_location="cpu")
     model = ViTTimeSeriesClassifier(ViTConfig(**checkpoint["config"]))
     model.load_state_dict(checkpoint["model_state_dict"])
+    threshold = checkpoint.get("decision_threshold")
+    if isinstance(threshold, dict) and threshold.get("threshold") is not None:
+        setattr(model, "decision_threshold_", float(threshold["threshold"]))
     return model
 
 

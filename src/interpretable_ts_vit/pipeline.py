@@ -21,7 +21,7 @@ from .datasets import MIMICIVMultiTargetAdapter, MIMICTargetsConfig, TargetWindo
 from .explain import explain_model
 from .io import load_model, load_split, save_metadata, save_predictions, save_split
 from .model import ViTConfig, ViTTimeSeriesClassifier
-from .training import evaluate_model, predict_model, train_model
+from .training import evaluate_model, print_class_balance, predict_model, train_model
 from .visualization import aggregate_cluster_value_matrices, cluster_assignment_counts, patient_value_matrix, plot_value_heatmap, value_ranges_by_variable
 
 
@@ -295,6 +295,11 @@ def _train_and_save(config: Config, data_dir: str | Path, run_dir: str | Path) -
     train_ds = load_split(data_dir / "train.npz")
     val_ds = load_split(data_dir / "val.npz")
     binner = TimeSeriesBinner.load(data_dir / "binner.json")
+    print_class_balance("train", train_ds, binner.index_to_label_)
+    print_class_balance("val", val_ds, binner.index_to_label_)
+    test_path = data_dir / "test.npz"
+    if test_path.exists():
+        print_class_balance("test", load_split(test_path), binner.index_to_label_)
     x_shape = train_ds.x.shape
     model_config = ViTConfig(
         **config.model.__dict__,
@@ -323,7 +328,13 @@ def _load_evaluate_and_save(config: Config, run_dir: str | Path, split: str) -> 
     with (run_dir / f"{split}_evaluation_metrics.json").open("w", encoding="utf-8") as fh:
         json.dump(_jsonable(metrics), fh, indent=2)
     logits, _ = predict_model(model, dataset, config.train)
-    save_predictions(run_dir / f"{split}_predictions.csv", dataset.patient_ids or [], logits, binner.index_to_label_)
+    save_predictions(
+        run_dir / f"{split}_predictions.csv",
+        dataset.patient_ids or [],
+        logits,
+        binner.index_to_label_,
+        decision_threshold=getattr(model, "decision_threshold_", None),
+    )
     return metrics
 
 
