@@ -77,6 +77,8 @@ def _mini_mimic_zip(tmp_path):
     lab(12, 50, 1008, 0.3, "ng/mL")
     lab(20, 52, 1001, 60, "mg/dL")
     lab(21, 52, 1001, 90, "mg/dL")
+    lab(21, 53, 1001, 0.12, "mg/dL")
+    lab(21, 1, 1001, 1276103, "mg/dL")
     lab(22, 20, 1001, 60, "mg/dL")
     lab(22, 52, 1001, 65, "mg/dL")
     lab(20, 52, 1011, 3.2, "mmol/L")
@@ -108,6 +110,7 @@ def _mini_mimic_zip(tmp_path):
             [1, 10, 100, "2100-01-01 02:00:00", 223761, 98.6],
             [1, 10, 100, "2100-01-03 02:00:00", 220050, 85.0],
             [1, 11, 110, "2100-01-01 01:00:00", 220045, 82.0],
+            [1, 11, 110, "2100-01-01 02:00:00", 220050, 1025100.0],
             [1, 11, 110, "2100-01-03 02:00:00", 220050, 100.0],
             [1, 11, 110, "2100-01-03 02:00:00", 220051, 70.0],
             [1, 12, 120, "2100-01-01 20:00:00", 220051, 55.0],
@@ -247,6 +250,17 @@ def test_mimic_target_records_standardize_units_and_event_variables(tmp_path):
     assert dataset.metadata["window"]["name"] == "wide"
 
 
+def test_mimic_target_records_and_threshold_labels_drop_implausible_values(tmp_path):
+    zip_path = _mini_mimic_zip(tmp_path)
+    dataset = MIMICIVMultiTargetAdapter(_config(zip_path, tmp_path, targets=["hypoglycemia"])).prepare_all()[("wide", "hypoglycemia")]
+    records = dataset.records
+    labels = _labels(dataset)
+
+    assert labels["21"] == "false"
+    assert 1276103.0 not in set(records.loc[records["variable"] == "blood_glucose", "value"])
+    assert 1025100.0 not in set(records.loc[records["variable"] == "systolic_bp", "value"])
+
+
 def test_temperature_c_and_f_chart_variables_collapse_to_temperature(tmp_path):
     zip_path = _mini_mimic_zip(tmp_path)
     config = _config(zip_path, tmp_path, targets=["hypoglycemia"])
@@ -301,6 +315,7 @@ def test_configured_variables_for_target_reflects_yaml_mappings(tmp_path):
     }
 
     assert configured_variables_for_target(config, "hypoglycemia") == ["blood_glucose", "dextrose_10", "temperature"]
+    assert config.plausible_value_ranges["blood_glucose"] == (20.0, 1000.0)
 
 
 def test_prepare_mimic_targets_endpoint_outputs_only_pre_tensor_files(tmp_path):
@@ -392,6 +407,50 @@ def test_mimic_config_uses_interface_target_window(tmp_path):
 
     assert isinstance(config.windows[0], TargetWindowConfig)
     assert config.windows[0].name == "obs12_target6_gap2"
+
+
+def test_mimic_config_accepts_named_itemid_entries(tmp_path):
+    config_path = tmp_path / "targets.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mimic_path: mimic-iv-3.1.zip",
+                f"output_dir: {(tmp_path / 'prepared').as_posix()}",
+                "windows:",
+                "  - name: obs12_target6_gap2",
+                "    observation_hours: 12",
+                "    prediction_hours: 6",
+                "    gap_hours: 2",
+                "lab_itemids:",
+                "  blood_glucose:",
+                "    - id: 1001",
+                "      name: Glucose",
+                "target_variables:",
+                "  hypoglycemia:",
+                "    chart_itemids:",
+                "      temperature_f:",
+                "        - id: 223761",
+                "          name: Temperature Fahrenheit",
+                "      temperature_c:",
+                "        - itemid: 223762",
+                "          name: Temperature Celsius",
+                "    inputevent_itemids:",
+                "      dextrose_10:",
+                "        - id: 300001",
+                "          name: Dextrose 10%",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_mimic_targets_config(config_path)
+
+    assert config.lab_itemids == {"blood_glucose": [1001]}
+    assert config.target_variables["hypoglycemia"].chart_itemids == {
+        "temperature_c": [223762],
+        "temperature_f": [223761],
+    }
+    assert config.target_variables["hypoglycemia"].inputevent_itemids == {"dextrose_10": [300001]}
 
 
 def test_legacy_and_canonical_mimic_config_paths_are_present():

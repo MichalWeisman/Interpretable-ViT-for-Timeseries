@@ -306,7 +306,7 @@ def infer_variable_display_metadata(
         metadata[variable] = {
             "display_name": readable_variable_name(variable),
             "group": group,
-            "items": [{"id": str(item), "name": "name unavailable", "missing_name": True} for item in items],
+            "items": [_metadata_item_payload(item) for item in items],
         }
     conversions = dataset_metadata.get("unit_conversions", {}) if isinstance(dataset_metadata, Mapping) else {}
     if isinstance(conversions, Mapping):
@@ -611,11 +611,27 @@ def _variables_from_metadata(dataset_metadata: Mapping[str, object]) -> list[str
 
 
 def _mimic_item_payload(item: object, name_by_id: Mapping[str, str]) -> dict[str, object]:
-    item_id = str(item)
+    if isinstance(item, Mapping):
+        item_id = str(item.get("id", item.get("itemid", "")))
+        item_name = item.get("name", item.get("label"))
+        if item_name:
+            return {"id": item_id, "name": str(item_name)}
+    else:
+        item_id = str(item)
     name = name_by_id.get(item_id)
     if name:
         return {"id": item_id, "name": name}
     return {"id": item_id, "name": "name unavailable", "missing_name": True}
+
+
+def _metadata_item_payload(item: object) -> dict[str, object]:
+    if isinstance(item, Mapping):
+        item_id = str(item.get("id", item.get("itemid", "")))
+        name = item.get("name", item.get("label"))
+        if name:
+            return {"id": item_id, "name": str(name)}
+        return {"id": item_id, "name": "name unavailable", "missing_name": True}
+    return {"id": str(item), "name": "name unavailable", "missing_name": True}
 
 
 def _load_mimic_item_dictionaries(mimic_path: str | Path) -> dict[str, dict[str, str]]:
@@ -790,11 +806,11 @@ main { padding: 22px; }
 .header-controls select { flex: 1; min-width: 260px; }
 .experiment-view { display: block; }
 .experiment-card, .compare-pane { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
-.table-grid { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr); gap: 14px; margin: 8px 0 16px; }
+.table-grid { display: grid; gap: 14px; margin: 8px 0 16px; }
 .info-table, .stats-table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); background: white; font-size: 12px; }
 .info-table caption, .stats-table caption { text-align: left; font-weight: 800; font-size: 14px; padding: 0 0 7px; color: var(--ink); }
 .info-table th, .info-table td, .stats-table th, .stats-table td { border-top: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
-.info-table th { width: 42%; color: var(--muted); font-weight: 650; background: var(--soft); }
+.info-table th { color: var(--muted); font-weight: 650; background: var(--soft); }
 .stats-table th { color: var(--muted); font-weight: 750; background: var(--soft); white-space: nowrap; }
 .stats-section { display: grid; gap: 12px; margin: 6px 0 16px; }
 .empty-note { padding: 9px 10px; border: 1px solid var(--line); background: var(--soft); border-radius: 6px; color: var(--muted); font-size: 12px; }
@@ -809,7 +825,8 @@ main { padding: 22px; }
 .corner, .time-label { color: var(--muted); font-size: 11px; display: flex; align-items: end; justify-content: center; padding: 2px; }
 .row-label { position: sticky; left: 0; z-index: 2; background: #fff; display: flex; align-items: center; padding: 0 6px; border-right: 1px solid var(--line); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .group-row { grid-column: 1 / -1; display: flex; align-items: center; padding: 6px 4px 2px; color: var(--accent); font-size: 11px; font-weight: 800; border-bottom: 2px solid color-mix(in srgb, var(--accent), white 72%); }
-.cell { border: 1px solid rgba(255,255,255,.72); min-width: 12px; border-radius: 2px; background: #d9dee7; }
+.cell { position: relative; border: 1px solid rgba(255,255,255,.72); min-width: 12px; border-radius: 2px; background: #d9dee7; }
+.cell[data-value]:hover::after { content: attr(data-value); position: absolute; left: 50%; bottom: calc(100% + 4px); transform: translateX(-50%); z-index: 10; padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--ink); color: #fff; font-size: 10px; white-space: nowrap; pointer-events: none; box-shadow: 0 2px 6px rgba(16,24,40,.18); }
 .cell.empty { background: repeating-linear-gradient(135deg, #eef1f5, #eef1f5 4px, #dde3eb 4px, #dde3eb 8px); }
 .clinical-legend { width: 58px; display: grid; grid-template-rows: auto 1fr auto; gap: 6px; justify-items: center; color: var(--muted); font-size: 11px; }
 .legend-title { writing-mode: vertical-rl; transform: rotate(180deg); font-weight: 800; color: var(--ink); text-align: center; }
@@ -819,7 +836,7 @@ main { padding: 22px; }
 .detail-row { padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .detail-title { font-weight: 750; }
 .detail-meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
-.items { margin-top: 6px; color: #344054; font-size: 12px; line-height: 1.35; }
+.items { margin: 6px 0 0; padding-left: 18px; color: #344054; font-size: 12px; line-height: 1.35; }
 .missing-name { color: #9a3412; font-weight: 650; }
 .compare-toolbar { display: flex; gap: 12px; margin-bottom: 14px; }
 .compare-toolbar select { flex: 1; }
@@ -840,38 +857,54 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':
 
 document.getElementById('subtitle').textContent = `${payload.experiments.length} experiment${payload.experiments.length === 1 ? '' : 's'} · ${payload.split} split · top ${(payload.top_importance_fraction * 100).toFixed(0)}% importance cells`;
 
-function renderInfoTable(title, rows) {
-  return `<table class="info-table"><caption>${escapeHtml(title)}</caption><tbody>${rows.map(([key, value]) => `<tr><th>${escapeHtml(key)}</th><td>${escapeHtml(value)}</td></tr>`).join('')}</tbody></table>`;
+function renderSingleRowTable(title, columns, row, className = 'info-table') {
+  return `<table class="${className}"><caption>${escapeHtml(title)}</caption><thead><tr>${columns.map(col => `<th>${escapeHtml(col.label)}</th>`).join('')}</tr></thead><tbody><tr>${columns.map(col => `<td>${escapeHtml(formatCell(row[col.key]))}</td>`).join('')}</tr></tbody></table>`;
 }
 
 function configTable(config) {
-  const rows = [
-    ['Target', config.target],
-    ['Target definition', config.target_definition],
-    ['Observation / gap / prediction', `${fmt(config.observation_hours, 0)}h / ${fmt(config.gap_hours, 0)}h / ${fmt(config.prediction_hours, 0)}h`],
-    ['Binning interval', config.binning_interval],
-    ['Time bins', fmt(config.time_bins, 0)],
-    ['Variables', fmt(config.variables, 0)],
-    ['Patch size', Array.isArray(config.patch_size) ? config.patch_size.join(' x ') : config.patch_size],
-    ['Model', `dim ${fmt(config.embed_dim, 0)}, depth ${fmt(config.depth, 0)}, heads ${fmt(config.num_heads, 0)}`],
-    ['Clustering', `${config.cluster_feature_mode} / ${config.cluster_method}`],
-    ['Clusters used', JSON.stringify(config.clusters_used)]
+  const row = {
+    target: config.target,
+    target_definition: config.target_definition,
+    observation: `${fmt(config.observation_hours, 0)}h`,
+    gap: Number(config.gap_hours) === 0 ? 'None' : `${fmt(config.gap_hours, 0)}h`,
+    binning_interval: config.binning_interval,
+    patch_size: Array.isArray(config.patch_size) ? config.patch_size.join(' x ') : config.patch_size,
+  };
+  const columns = [
+    {key: 'target', label: 'Target'},
+    {key: 'target_definition', label: 'Target definition'},
+    {key: 'observation', label: 'Observation'},
+    {key: 'gap', label: 'gap'},
+    {key: 'binning_interval', label: 'Binning interval'},
+    {key: 'patch_size', label: 'Patch size'},
   ];
-  return renderInfoTable('Configuration', rows);
+  return renderSingleRowTable('Configuration', columns, row);
 }
 
 function metricsTable(metrics) {
-  const rows = [
-    ['Accuracy', pct(metrics.accuracy)],
-    ['Macro F1', pct(metrics.macro_f1)],
-    ['AUROC / AUC', `${fmt(metrics.auroc)} / ${fmt(metrics.auc)}`],
-    ['TPR / FPR / TNR / FNR', `${pct(metrics.tpr)} / ${pct(metrics.fpr)} / ${pct(metrics.tnr)} / ${pct(metrics.fnr)}`],
-    ['PPV', pct(metrics.ppv)],
-    ['Confusion matrix', JSON.stringify(metrics.confusion_matrix ?? 'not recorded')],
-    ['Best epoch', fmt(metrics.best_epoch, 0)],
-    ['Epochs ran', fmt(metrics.epochs_ran, 0)]
+  const row = {
+    auc: metrics.auc ?? metrics.auroc,
+    tpr: metrics.tpr,
+    fpr: metrics.fpr,
+    tnr: metrics.tnr,
+    fnr: metrics.fnr,
+    ppv: metrics.ppv,
+    macro_f1: metrics.macro_f1,
+    best_epoch: metrics.best_epoch,
+    epochs_ran: metrics.epochs_ran,
+  };
+  const columns = [
+    {key: 'auc', label: 'AUC'},
+    {key: 'tpr', label: 'TPR'},
+    {key: 'fpr', label: 'FPR'},
+    {key: 'tnr', label: 'TNR'},
+    {key: 'fnr', label: 'FNR'},
+    {key: 'ppv', label: 'PPV'},
+    {key: 'macro_f1', label: 'Macro F1'},
+    {key: 'best_epoch', label: 'Best epoch'},
+    {key: 'epochs_ran', label: 'Epochs ran'},
   ];
-  return renderInfoTable('Test Results', rows);
+  return renderSingleRowTable('Test Results', columns, row);
 }
 
 function renderTables(experiment) {
@@ -884,36 +917,28 @@ function renderRecordTable(title, rows, columns, className = '') {
 }
 
 function formatCell(value) {
-  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  if (typeof value === 'boolean') return value ? 'True' : 'False';
   if (typeof value === 'number') return fmt(value, Math.abs(value) < 0.001 && value !== 0 ? 4 : 3);
   return value ?? 'not recorded';
 }
 
 function renderStatistics(experiment) {
   const stats = experiment.statistics || {};
-  const classColumns = [
-    {key: 'pattern', label: 'Pattern'},
-    {key: 'more_similar_class', label: 'More similar class'},
-    {key: 'n_same_class', label: 'Same n'},
-    {key: 'n_other_class', label: 'Other n'},
-    {key: 'mean_same_class', label: 'Same mean'},
-    {key: 'mean_other_class', label: 'Other mean'},
-    {key: 'mean_difference', label: 'Mean diff.'},
+  const rows = (stats.class_similarity_tests || []).map(row => ({
+    pattern_class: row.pattern,
+    most_similar_class: row.more_similar_class,
+    mean_difference: row.mean_difference,
+    p_value: row.p_value,
+    is_significant: row.is_significant,
+  }));
+  const columns = [
+    {key: 'pattern_class', label: 'Pattern of class'},
+    {key: 'most_similar_class', label: 'Most similar class'},
+    {key: 'mean_difference', label: 'similarity mean diff'},
     {key: 'p_value', label: 'p-value'},
-    {key: 'is_significant', label: 'Significant'}
+    {key: 'is_significant', label: 'Significant'},
   ];
-  const similarityColumns = [
-    {key: 'metric', label: 'Similarity'},
-    {key: 'count', label: 'Count'},
-    {key: 'mean', label: 'Mean'},
-    {key: 'std', label: 'Std'},
-    {key: 'min', label: 'Min'},
-    {key: '25%', label: '25%'},
-    {key: '50%', label: '50%'},
-    {key: '75%', label: '75%'},
-    {key: 'max', label: 'Max'}
-  ];
-  return `<section class="stats-section">${renderRecordTable('Statistical Tests', stats.class_similarity_tests, classColumns, 'statistical-tests')}${renderRecordTable('Patient Pattern Similarity Summary', stats.pattern_similarity_summary, similarityColumns)}</section>`;
+  return `<section class="stats-section">${renderRecordTable('Pattern similarity statistical test', rows, columns, 'statistical-tests')}</section>`;
 }
 
 function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
@@ -959,7 +984,7 @@ function renderHeatmap(pattern) {
       const status = pattern.range_status ? pattern.range_status[row][col] : null;
       const color = clinicalColor(status, value);
       const style = color ? `background:${color}` : '';
-      html += `<div class="cell ${value === null ? 'empty' : ''}" style="${style}" title="${escapeHtml(cellTitle(pattern, variable, row, col))}"></div>`;
+      html += `<div class="cell ${value === null ? 'empty' : ''}" style="${style}" ${value === null ? '' : `data-value="${escapeHtml(fmt(value))}" title="${escapeHtml(cellTitle(pattern, variable, row, col))}"`}></div>`;
     });
   });
   html += '</div>';
@@ -973,9 +998,9 @@ function renderDetails(variables) {
     const rangeText = range ? `${fmt(range.low)}-${fmt(range.high)}${range.unit ? ' ' + escapeHtml(range.unit) : ''}` : 'not recorded';
     const items = (variable.items || []).map(item => {
       const name = item.missing_name ? `<span class="missing-name">name unavailable</span>` : escapeHtml(item.name);
-      return `${name}${item.id ? ` (${escapeHtml(item.id)})` : ''}`;
-    }).join(', ');
-    return `<div class="detail-row"><div class="detail-title">${escapeHtml(variable.display_name)}</div><div class="detail-meta">${escapeHtml(variable.group_label)} · normal: ${rangeText}</div>${variable.note ? `<div class="detail-meta">${escapeHtml(variable.note)}</div>` : ''}${items ? `<div class="items">${items}</div>` : ''}</div>`;
+      return `<li>${name}${item.id ? ` (${escapeHtml(item.id)})` : ''}</li>`;
+    }).join('');
+    return `<div class="detail-row"><div class="detail-title">${escapeHtml(variable.display_name)}</div><div class="detail-meta">${escapeHtml(variable.group_label)} · normal: ${rangeText}</div>${variable.note ? `<div class="detail-meta">${escapeHtml(variable.note)}</div>` : ''}${items ? `<ul class="items">${items}</ul>` : ''}</div>`;
   }).join('')}</div>`;
 }
 

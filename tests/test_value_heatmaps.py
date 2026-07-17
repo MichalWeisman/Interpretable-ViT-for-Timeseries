@@ -204,7 +204,7 @@ def test_value_heatmap_supports_normal_range_status_coloring(tmp_path):
     assert (tmp_path / "normal_ranges.png").exists()
 
 
-def test_normal_range_status_coloring_uses_shades_within_each_range():
+def test_normal_range_status_coloring_treats_range_as_inclusive_normal():
     matrix = np.array([[55.0, 58.0, 60.0, 70.0, 90.0, 100.0, 110.0, 120.0]])
     ranges = {"heart_rate": {"low": 60.0, "high": 100.0}}
 
@@ -212,10 +212,9 @@ def test_normal_range_status_coloring_uses_shades_within_each_range():
 
     assert np.isclose(status[0], -1.0)
     assert -1.0 < status[1] < 0.0
-    assert status[2] < status[3] < status[4] < status[5]
+    assert np.allclose(status[2:6], 0.0)
     assert 0.0 < status[6] < 1.0
     assert np.isclose(status[7], 1.0)
-    assert len(set(np.round(status, 3))) == len(status)
 
 
 def test_relative_time_ticks_use_one_unit():

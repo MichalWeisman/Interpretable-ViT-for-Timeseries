@@ -135,7 +135,7 @@ def test_variable_grouping_orders_metadata_sources():
     metadata = infer_variable_display_metadata(
         {
             "variable_mappings": {
-                "chart_itemids": {"heart_rate": [1]},
+                "chart_itemids": {"heart_rate": [{"id": 1, "name": "Heart Rate"}]},
                 "lab_itemids": {"blood_glucose": [2]},
                 "inputevent_itemids": {"dextrose_hypertonic": [3]},
             }
@@ -149,6 +149,7 @@ def test_variable_grouping_orders_metadata_sources():
         "dextrose_hypertonic",
         "unknown_signal",
     ]
+    assert metadata["heart_rate"]["items"][0] == {"id": "1", "name": "Heart Rate"}
     assert metadata["dextrose_hypertonic"]["items"][0]["name"] == "name unavailable"
     assert metadata["dextrose_hypertonic"]["items"][0]["missing_name"] is True
 
@@ -196,7 +197,9 @@ def test_build_experiment_report_writes_embedded_html(tmp_path):
     assert "experimentSelect" in text
     assert "Configuration" in text
     assert "Test Results" in text
-    assert "Statistical Tests" in text
+    assert "Pattern similarity statistical test" in text
+    assert "Target definition" in text
+    assert "Most similar class" in text
     assert "Clinical range status" in text
     assert "variable-description-grid" in text
     assert "Class Pattern Visualization" in text

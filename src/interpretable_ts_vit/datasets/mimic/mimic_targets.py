@@ -83,6 +83,7 @@ class MIMICTargetsConfig:
     inputevent_regexes: dict[str, list[str]] = field(default_factory=dict)
     inputevent_itemids: dict[str, list[int]] = field(default_factory=dict)
     target_variables: dict[str, MIMICTargetVariableConfig] = field(default_factory=dict)
+    plausible_value_ranges: dict[str, tuple[float, float]] = field(default_factory=dict)
     chunk_size: int = 1_000_000
     use_extracted_files: bool = True
     use_filtered_cache: bool = True
@@ -257,7 +258,7 @@ class MIMICIVMultiTargetAdapter:
         return mappings
 
     def _resolve_lab_itemids(self, itemids_by_variable: dict[str, list[int]], regexes_by_variable: dict[str, list[str]]) -> dict[str, list[int]]:
-        configured = {name: sorted({int(itemid) for itemid in itemids}) for name, itemids in itemids_by_variable.items()}
+        configured = _coerce_itemid_mapping(itemids_by_variable)
         try:
             labs = self.source.read_table("hosp/d_labitems.csv.gz", usecols=["itemid", "label", "fluid", "category"])
         except FileNotFoundError:
@@ -278,7 +279,7 @@ class MIMICIVMultiTargetAdapter:
         return configured
 
     def _resolve_inputevent_itemids(self, itemids_by_variable: dict[str, list[int]], regexes_by_variable: dict[str, list[str]]) -> dict[str, list[int]]:
-        configured = {name: sorted({int(itemid) for itemid in itemids}) for name, itemids in itemids_by_variable.items()}
+        configured = _coerce_itemid_mapping(itemids_by_variable)
         try:
             items = self.source.read_table("icu/d_items.csv.gz", usecols=["itemid", "label", "abbreviation", "category"])
         except FileNotFoundError:
@@ -485,6 +486,7 @@ class MIMICIVMultiTargetAdapter:
                 celsius_min=self.config.temperature_celsius_min,
                 celsius_max=self.config.temperature_celsius_max,
             )
+        frame = frame[_plausible_value_mask(frame["variable"], frame["value"], self.config.plausible_value_ranges)]
         frame["patient_id"] = frame["_cohort_id"].astype(str)
         frame["timestamp"] = self._relative_timestamp(frame[time_col], frame["_cohort_start"])
         return frame[columns]
@@ -610,6 +612,7 @@ class MIMICIVMultiTargetAdapter:
         if events.empty:
             return self._labels_from_sets(inputs.cohort, set(), set(), definition)
         events = self._attach_window(events, inputs.cohort)
+        events = events[_plausible_value_mask(pd.Series(variable, index=events.index), events["valuenum"], self.config.plausible_value_ranges)]
         abnormal = events[pd.to_numeric(events["valuenum"], errors="coerce").map(lambda value: _compare(value, threshold, op))]
         id_col = self._cohort_id_col()
         prior = set(abnormal.loc[abnormal["charttime"] < abnormal["prediction_start"], id_col].astype(int)) if exclude_prior else set()
@@ -1011,8 +1014,26 @@ def _merge_item_mappings(mappings: Any) -> dict[str, list[int]]:
     merged: dict[str, set[int]] = {}
     for mapping in mappings:
         for variable, itemids in mapping.items():
-            merged.setdefault(str(variable), set()).update(int(itemid) for itemid in itemids)
+            merged.setdefault(str(variable), set()).update(_coerce_itemid(itemid) for itemid in itemids)
     return {variable: sorted(itemids) for variable, itemids in merged.items()}
+
+
+def _coerce_itemid_mapping(mapping: Mapping[str, Any] | None) -> dict[str, list[int]]:
+    """Return variable -> item ID mappings, accepting optional item metadata entries."""
+    return {
+        str(variable): sorted({_coerce_itemid(item) for item in items})
+        for variable, items in (mapping or {}).items()
+    }
+
+
+def _coerce_itemid(item: Any) -> int:
+    if isinstance(item, Mapping):
+        if "id" in item:
+            return int(item["id"])
+        if "itemid" in item:
+            return int(item["itemid"])
+        raise ValueError(f"Item mapping entries must include an id or itemid field: {item!r}")
+    return int(item)
 
 
 def _merge_regex_mappings(mappings: Any) -> dict[str, list[str]]:
@@ -1036,7 +1057,7 @@ def _canonical_chart_variable(variable: str) -> str:
 def _canonical_chart_itemids(mapping: dict[str, list[int]]) -> dict[str, list[int]]:
     merged: dict[str, set[int]] = {}
     for variable, itemids in mapping.items():
-        merged.setdefault(_canonical_chart_variable(variable), set()).update(int(itemid) for itemid in itemids)
+        merged.setdefault(_canonical_chart_variable(variable), set()).update(_coerce_itemid(itemid) for itemid in itemids)
     return {variable: sorted(itemids) for variable, itemids in merged.items()}
 
 
@@ -1056,11 +1077,21 @@ def load_mimic_targets_config(path: str | Path) -> MIMICTargetsConfig:
         raise ValueError(f"MIMIC target config is missing required field(s): {', '.join(missing)}")
     if "windows" in raw:
         raw["windows"] = [window if isinstance(window, TargetWindowConfig) else TargetWindowConfig(**window) for window in raw["windows"]]
+    for key in ["lab_itemids", "chart_itemids", "inputevent_itemids"]:
+        raw[key] = _coerce_itemid_mapping(raw.get(key))
     if "target_variables" in raw:
-        raw["target_variables"] = {
-            str(target): value if isinstance(value, MIMICTargetVariableConfig) else MIMICTargetVariableConfig(**(value or {}))
-            for target, value in (raw["target_variables"] or {}).items()
-        }
+        target_variables = {}
+        for target, value in (raw["target_variables"] or {}).items():
+            if isinstance(value, MIMICTargetVariableConfig):
+                target_variables[str(target)] = value
+                continue
+            value = dict(value or {})
+            for key in ["lab_itemids", "chart_itemids", "inputevent_itemids"]:
+                value[key] = _coerce_itemid_mapping(value.get(key))
+            target_variables[str(target)] = MIMICTargetVariableConfig(**value)
+        raw["target_variables"] = target_variables
+    if "plausible_value_ranges" in raw:
+        raw["plausible_value_ranges"] = _coerce_plausible_value_ranges(raw["plausible_value_ranges"] or {})
     return MIMICTargetsConfig(**raw)
 
 
@@ -1118,6 +1149,30 @@ def _compare(value: float, threshold: float, op: str) -> bool:
     if op == "<":
         return float(value) < threshold
     raise ValueError(op)
+
+
+def _coerce_plausible_value_ranges(raw: Mapping[str, Any]) -> dict[str, tuple[float, float]]:
+    ranges: dict[str, tuple[float, float]] = {}
+    for variable, bounds in raw.items():
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            raise ValueError(f"plausible_value_ranges.{variable} must contain exactly two numeric bounds.")
+        minimum = float(bounds[0])
+        maximum = float(bounds[1])
+        if minimum > maximum:
+            raise ValueError(f"plausible_value_ranges.{variable} minimum cannot exceed maximum.")
+        ranges[str(variable)] = (minimum, maximum)
+    return ranges
+
+
+def _plausible_value_mask(variables: pd.Series, values: pd.Series, ranges: Mapping[str, tuple[float, float]]) -> pd.Series:
+    variables = variables.astype(str)
+    numeric_values = pd.to_numeric(values, errors="coerce")
+    mask = pd.Series(True, index=values.index)
+    for variable, (minimum, maximum) in ranges.items():
+        variable_mask = variables == variable
+        if variable_mask.any():
+            mask.loc[variable_mask] = numeric_values.loc[variable_mask].between(minimum, maximum, inclusive="both")
+    return mask
 
 
 register_dataset_adapter(MIMICIVMultiTargetAdapter.name, MIMICIVMultiTargetAdapter)

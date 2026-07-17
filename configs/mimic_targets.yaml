@@ -11,6 +11,23 @@ use_filtered_cache: true
 require_full_window: false
 require_outcome_measurement: false
 min_observations: 1
+plausible_value_ranges:
+  blood_glucose: [20.0, 1000.0]
+  bun: [1.0, 250.0]
+  creatinine: [0.1, 30.0]
+  diastolic_bp: [20.0, 200.0]
+  heart_rate: [20.0, 250.0]
+  hemoglobin: [3.0, 25.0]
+  magnesium: [0.5, 10.0]
+  o2_saturation_pulseox: [50.0, 100.0]
+  pco2: [5.0, 150.0]
+  platelet_count: [1.0, 2000.0]
+  po2: [10.0, 700.0]
+  potassium: [1.0, 10.0]
+  sodium: [100.0, 180.0]
+  systolic_bp: [40.0, 300.0]
+  temperature: [25.0, 45.0]
+  wbc: [0.1, 500.0]
 
 # Explicit per-target variable -> item ID mappings selected after notebook exploration.
 targets:

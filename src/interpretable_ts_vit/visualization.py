@@ -428,8 +428,8 @@ def normal_range_status_matrix(
 
     Values below the normal range are scaled from the row's finite minimum to
     the normal lower bound, giving darker blues for lower values and near-white
-    blues as values approach normal. Values inside the normal range receive a
-    subtle blue-white-red gradient around zero. Values above the normal range
+    blues as values approach normal. Values inside the normal range, including
+    both endpoints, receive a neutral score of 0. Values above the normal range
     are scaled from the normal upper bound to the row's finite maximum.
     """
     ranges = load_normal_ranges(normal_ranges)
@@ -467,12 +467,7 @@ def _normal_range_status_row(values: np.ndarray, low: float, high: float) -> np.
         else:
             status[low_mask] = -0.15
     if np.any(normal_mask):
-        midpoint = (low + high) / 2.0
-        half_width = (high - low) / 2.0
-        if half_width > 0:
-            status[normal_mask] = 0.18 * (values[normal_mask] - midpoint) / half_width
-        else:
-            status[normal_mask] = 0.0
+        status[normal_mask] = 0.0
     if np.any(high_mask):
         if row_max > high:
             status[high_mask] = (values[high_mask] - high) / (row_max - high)
