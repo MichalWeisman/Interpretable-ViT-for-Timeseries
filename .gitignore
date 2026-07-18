@@ -7,6 +7,8 @@ __pycache__/
 build/
 dist/
 runs/
+logs/*
+!logs/.gitkeep
 data/
 data/processed/
 data/mimic_hypotension/

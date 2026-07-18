@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 from .binning import TimeSeriesBinner
 from .autoencoder import cluster_autoencoder_embeddings, create_explanation_value_embeddings, train_explanation_value_autoencoder
@@ -195,20 +195,30 @@ def _prepare_tensor_splits(
     holdout_fraction = config.data.val_fraction + config.data.test_fraction
     if not 0 < holdout_fraction < 1:
         raise ValueError("val_fraction + test_fraction must be between 0 and 1.")
-    train_ids, holdout_ids, _, holdout_y = train_test_split(
-        patient_ids,
-        y,
-        test_size=holdout_fraction,
-        random_state=config.data.random_state,
-        stratify=_stratify_or_none(y),
-    )
-    relative_test = config.data.test_fraction / holdout_fraction
-    val_ids, test_ids = train_test_split(
-        holdout_ids,
-        test_size=relative_test,
-        random_state=config.data.random_state,
-        stratify=_stratify_or_none(holdout_y),
-    )
+    if "source_cohort_id" in labels.columns:
+        train_ids, val_ids, test_ids = _grouped_split_ids(
+            labels,
+            patient_id_col=config.data.patient_id_col,
+            label_col=config.data.label_col,
+            val_fraction=config.data.val_fraction,
+            test_fraction=config.data.test_fraction,
+            random_state=config.data.random_state,
+        )
+    else:
+        train_ids, holdout_ids, _, holdout_y = train_test_split(
+            patient_ids,
+            y,
+            test_size=holdout_fraction,
+            random_state=config.data.random_state,
+            stratify=_stratify_or_none(y),
+        )
+        relative_test = config.data.test_fraction / holdout_fraction
+        val_ids, test_ids = train_test_split(
+            holdout_ids,
+            test_size=relative_test,
+            random_state=config.data.random_state,
+            stratify=_stratify_or_none(holdout_y),
+        )
     split_ids = {"train": train_ids, "val": val_ids, "test": test_ids}
     logger.info("Created patient splits: train=%d, val=%d, test=%d", len(train_ids), len(val_ids), len(test_ids))
     train_labels = labels[labels[config.data.patient_id_col].astype(str).isin(train_ids)]
@@ -610,6 +620,71 @@ def _stratify_or_none(labels: list[str]) -> list[str] | None:
     if len(counts) < 2 or counts.min() < 2:
         return None
     return labels
+
+
+def _grouped_split_ids(
+    labels: pd.DataFrame,
+    *,
+    patient_id_col: str,
+    label_col: str,
+    val_fraction: float,
+    test_fraction: float,
+    random_state: int,
+) -> tuple[list[str], list[str], list[str]]:
+    """Split instances while keeping source cohorts together.
+
+    Multiple deterministic group-shuffle candidates are scored by sample count
+    and per-class proportions. This preserves the hard grouping invariant while
+    approximating the stratification used for ordinary one-row-per-patient data.
+    """
+    work = labels.reset_index(drop=True).copy()
+    if work["source_cohort_id"].nunique() < 3:
+        raise ValueError("Grouped splitting requires at least three source cohorts.")
+    holdout_fraction = val_fraction + test_fraction
+    train_idx, holdout_idx = _best_group_partition(
+        work,
+        fraction=holdout_fraction,
+        label_col=label_col,
+        random_state=random_state,
+    )
+    holdout = work.iloc[holdout_idx].reset_index().rename(columns={"index": "_original_index"})
+    relative_test = test_fraction / holdout_fraction
+    val_local, test_local = _best_group_partition(
+        holdout,
+        fraction=relative_test,
+        label_col=label_col,
+        random_state=random_state + 10_000,
+    )
+    val_idx = holdout.iloc[val_local]["_original_index"].astype(int).to_numpy()
+    test_idx = holdout.iloc[test_local]["_original_index"].astype(int).to_numpy()
+    ids = work[patient_id_col].astype(str)
+    return ids.iloc[train_idx].tolist(), ids.iloc[val_idx].tolist(), ids.iloc[test_idx].tolist()
+
+
+def _best_group_partition(
+    frame: pd.DataFrame,
+    *,
+    fraction: float,
+    label_col: str,
+    random_state: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    groups = frame["source_cohort_id"].astype(str).to_numpy()
+    if len(set(groups)) < 2:
+        raise ValueError("A grouped partition requires at least two source cohorts.")
+    labels = frame[label_col].astype(str)
+    class_rates = pd.get_dummies(labels).mean()
+    best: tuple[float, np.ndarray, np.ndarray] | None = None
+    for offset in range(128):
+        splitter = GroupShuffleSplit(n_splits=1, test_size=fraction, random_state=random_state + offset)
+        left, right = next(splitter.split(frame, labels, groups))
+        right_rates = pd.get_dummies(labels.iloc[right]).reindex(columns=class_rates.index, fill_value=0).mean()
+        size_error = abs(len(right) / len(frame) - fraction)
+        class_error = float((right_rates - class_rates).abs().mean())
+        score = size_error + class_error
+        if best is None or score < best[0]:
+            best = (score, left, right)
+    assert best is not None
+    return best[1], best[2]
 
 
 def _jsonable(value: Any) -> Any:

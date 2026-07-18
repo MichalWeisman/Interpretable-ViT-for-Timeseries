@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import re
 from typing import Any, Mapping
@@ -21,6 +22,7 @@ import pandas as pd
 
 from ..base import PreparedDataset, TargetWindowConfig, register_dataset_adapter
 from .mimic_iv import _MIMICSource, _jsonable, standardize_temperature_to_celsius
+from ...process_logging import process_log_file
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ class MIMICTargetsConfig:
     mimic_path: str | Path
     output_dir: str | Path = "data/mimic_targets"
     cache_dir: str | Path | None = "data/mimic_targets/cache"
+    logs_dir: str | Path | None = "logs"
     cohort_level: str = "admission"
     windows: list[TargetWindowConfig] = field(default_factory=list)
     targets: list[str] = field(default_factory=lambda: list(DEFAULT_TARGETS))
@@ -125,6 +128,10 @@ class MIMICIVMultiTargetAdapter:
 
     def prepare_all(self) -> dict[tuple[str, str], PreparedDataset]:
         """Return all configured datasets keyed by `(window_name, target_name)`."""
+        return dict(self._iter_prepared_datasets())
+
+    def _iter_prepared_datasets(self):
+        """Yield prepared datasets without retaining every output in memory."""
         self._validate_targets()
         target_mappings = self._resolve_target_mappings()
         all_lab_itemids = _merge_item_mappings(mapping.lab_itemids for mapping in target_mappings.values())
@@ -139,7 +146,6 @@ class MIMICIVMultiTargetAdapter:
         micro = self._load_microbiology()
         prescriptions = self._load_prescriptions(all_drug_regexes)
         inputevents = self._load_inputevents(sorted({itemid for itemids in all_input_itemids.values() for itemid in itemids}))
-        datasets: dict[tuple[str, str], PreparedDataset] = {}
         for window in self.config.windows:
             cohort = self._windowed_cohort(cohort_base, window)
             logger.info("Preparing MIMIC targets for window %s: cohort_level=%s rows=%d", window.name, self.config.cohort_level, len(cohort))
@@ -161,18 +167,27 @@ class MIMICIVMultiTargetAdapter:
                     mapping.drug_regexes,
                     target_metadata,
                 )
-                datasets[(window.name, target)] = PreparedDataset(target_records, labels, metadata)
-        return datasets
+                yield (window.name, target), PreparedDataset(target_records, labels, metadata)
 
     def save_all(self, output_dir: str | Path | None = None) -> dict[tuple[str, str], Path]:
         """Create and save all configured datasets."""
         root = Path(output_dir) if output_dir is not None else Path(self.config.output_dir)
-        outputs: dict[tuple[str, str], Path] = {}
-        for (window_name, target), prepared in self.prepare_all().items():
-            out = root / window_name / target
-            prepared.save(out)
-            outputs[(window_name, target)] = out
-        return outputs
+        with process_log_file(self.config.logs_dir, "dataset_creation") as log_path:
+            logger.info(
+                "Creating MIMIC target datasets: output_dir=%s cohort_level=%s windows=%s targets=%s log_file=%s",
+                root,
+                self.config.cohort_level,
+                [window.name for window in self.config.windows],
+                self.config.targets,
+                log_path,
+            )
+            outputs: dict[tuple[str, str], Path] = {}
+            for (window_name, target), prepared in self._iter_prepared_datasets():
+                out = root / window_name / target
+                prepared.save(out)
+                outputs[(window_name, target)] = out
+            logger.info("Created %d MIMIC target datasets under %s", len(outputs), root)
+            return outputs
 
     def _validate_targets(self) -> None:
         if self.config.cohort_level not in COHORT_LEVELS:
@@ -182,6 +197,25 @@ class MIMICIVMultiTargetAdapter:
             raise ValueError(f"Unknown target(s): {unknown}. Available targets: {TARGET_NAMES}")
         if self.config.cohort_level == "admission" and "hypotension" in self.config.targets:
             raise ValueError("Target 'hypotension' requires cohort_level='icu' because it is defined per ICU stay.")
+        for window in self.config.windows:
+            horizon = window.timeline_horizon_hours
+            stride = window.window_stride_hours
+            if (horizon is None) != (stride is None):
+                raise ValueError(
+                    f"Window {window.name!r} must set timeline_horizon_hours and window_stride_hours together."
+                )
+            values = {
+                "observation_hours": window.observation_hours,
+                "prediction_hours": window.prediction_hours,
+                "gap_hours": window.gap_hours,
+            }
+            if horizon is not None:
+                values.update(timeline_horizon_hours=horizon, window_stride_hours=stride)
+            for field_name, value in values.items():
+                if not math.isfinite(float(value)) or (field_name != "gap_hours" and float(value) <= 0) or (field_name == "gap_hours" and float(value) < 0):
+                    raise ValueError(f"Window {window.name!r} has invalid {field_name}={value!r}.")
+            if horizon is not None and horizon < window.observation_hours + window.gap_hours + window.prediction_hours:
+                raise ValueError(f"Window {window.name!r} timeline_horizon_hours cannot contain one complete instance.")
 
     def _load_cohort(self) -> pd.DataFrame:
         if self.config.cohort_level == "icu":
@@ -224,10 +258,31 @@ class MIMICIVMultiTargetAdapter:
         return stays
 
     def _windowed_cohort(self, admissions: pd.DataFrame, window: TargetWindowConfig) -> pd.DataFrame:
-        cohort = admissions.copy()
         start_col = self._cohort_start_col()
         end_col = self._cohort_end_col()
-        cohort["observation_end"] = cohort[start_col] + pd.to_timedelta(window.observation_hours, unit="h")
+        source_id_col = self._cohort_id_col()
+        base = admissions.reset_index().copy()
+        if window.timeline_horizon_hours is None:
+            offsets = [0.0]
+        else:
+            complete_hours = window.observation_hours + window.gap_hours + window.prediction_hours
+            last_start = window.timeline_horizon_hours - complete_hours
+            count = int(math.floor((last_start + 1e-12) / float(window.window_stride_hours))) + 1
+            offsets = [index * float(window.window_stride_hours) for index in range(count)]
+        pieces = []
+        repeated = window.timeline_horizon_hours is not None
+        for window_index, offset in enumerate(offsets):
+            piece = base.copy()
+            piece["source_cohort_id"] = piece[source_id_col].astype(str)
+            piece["window_index"] = window_index
+            piece["window_start_hours"] = offset
+            piece["_instance_id"] = (
+                piece["source_cohort_id"] + f"__window_{window_index}" if repeated else piece["source_cohort_id"]
+            )
+            piece["observation_start"] = piece[start_col] + pd.to_timedelta(offset, unit="h")
+            pieces.append(piece)
+        cohort = pd.concat(pieces, ignore_index=True).set_index("_instance_id", drop=False)
+        cohort["observation_end"] = cohort["observation_start"] + pd.to_timedelta(window.observation_hours, unit="h")
         cohort["prediction_start"] = cohort["observation_end"] + pd.to_timedelta(window.gap_hours, unit="h")
         cohort["prediction_end"] = cohort["prediction_start"] + pd.to_timedelta(window.prediction_hours, unit="h")
         if self.config.require_full_window:
@@ -487,7 +542,7 @@ class MIMICIVMultiTargetAdapter:
                 celsius_max=self.config.temperature_celsius_max,
             )
         frame = frame[_plausible_value_mask(frame["variable"], frame["value"], self.config.plausible_value_ranges)]
-        frame["patient_id"] = frame["_cohort_id"].astype(str)
+        frame["patient_id"] = frame["_instance_id"].astype(str)
         frame["timestamp"] = self._relative_timestamp(frame[time_col], frame["_cohort_start"])
         return frame[columns]
 
@@ -509,7 +564,7 @@ class MIMICIVMultiTargetAdapter:
         frame.loc[text.str.contains("blood", regex=False), "variable"] = "blood_culture"
         frame.loc[text.str.contains("urine", regex=False), "variable"] = "urine_culture"
         frame = frame.dropna(subset=["variable"])
-        frame["patient_id"] = frame["_cohort_id"].astype(str)
+        frame["patient_id"] = frame["_instance_id"].astype(str)
         frame["value"] = 1.0
         frame["timestamp"] = self._relative_timestamp(frame["charttime"], frame["_cohort_start"])
         return frame[columns]
@@ -526,13 +581,13 @@ class MIMICIVMultiTargetAdapter:
         for variable, patterns in drug_regexes.items():
             matched = frame[_match_patterns(frame["drug_text"], patterns)]
             if not matched.empty:
-                out = matched[["_cohort_id", "starttime", "_cohort_start"]].copy()
+                out = matched[["_instance_id", "starttime", "_cohort_start"]].copy()
                 out["variable"] = variable
                 rows.append(out)
         if not rows:
             return pd.DataFrame(columns=columns)
         records = pd.concat(rows, ignore_index=True)
-        records["patient_id"] = records["_cohort_id"].astype(str)
+        records["patient_id"] = records["_instance_id"].astype(str)
         records["value"] = 1.0
         records["timestamp"] = self._relative_timestamp(records["starttime"], records["_cohort_start"])
         return records[columns]
@@ -550,7 +605,7 @@ class MIMICIVMultiTargetAdapter:
                 item_to_variables.setdefault(itemid, []).append(variable)
         frame["variable"] = frame["itemid"].astype(int).map(item_to_variables)
         frame = frame.dropna(subset=["variable"]).explode("variable")
-        frame["patient_id"] = frame["_cohort_id"].astype(str)
+        frame["patient_id"] = frame["_instance_id"].astype(str)
         frame["value"] = 1.0
         frame["timestamp"] = self._relative_timestamp(frame["starttime"], frame["_cohort_start"])
         return frame[columns]
@@ -614,14 +669,14 @@ class MIMICIVMultiTargetAdapter:
         events = self._attach_window(events, inputs.cohort)
         events = events[_plausible_value_mask(pd.Series(variable, index=events.index), events["valuenum"], self.config.plausible_value_ranges)]
         abnormal = events[pd.to_numeric(events["valuenum"], errors="coerce").map(lambda value: _compare(value, threshold, op))]
-        id_col = self._cohort_id_col()
-        prior = set(abnormal.loc[abnormal["charttime"] < abnormal["prediction_start"], id_col].astype(int)) if exclude_prior else set()
+        id_col = "_instance_id"
+        prior = set(abnormal.loc[abnormal["charttime"] < abnormal["prediction_start"], id_col].astype(str)) if exclude_prior else set()
         positive = set(
             abnormal.loc[
                 (abnormal["charttime"] >= abnormal["prediction_start"])
                 & (abnormal["charttime"] < abnormal["prediction_end"]),
                 id_col,
-            ].astype(int)
+            ].astype(str)
         )
         return self._labels_from_sets(inputs.cohort, positive, prior, definition)
 
@@ -637,19 +692,19 @@ class MIMICIVMultiTargetAdapter:
             return self._labels_from_sets(inputs.cohort, set(), set(), definition)
         events = self._attach_window(events, inputs.cohort)
         events["value"] = pd.to_numeric(events["valuenum"], errors="coerce")
-        id_col = self._cohort_id_col()
-        prior = set(events.loc[(events["charttime"] < events["prediction_start"]) & (events["value"] > self.config.hyperglycemia_threshold), id_col].astype(int))
-        positive: set[int] = set()
+        id_col = "_instance_id"
+        prior = set(events.loc[(events["charttime"] < events["prediction_start"]) & (events["value"] > self.config.hyperglycemia_threshold), id_col].astype(str))
+        positive: set[str] = set()
         min_offset = pd.to_timedelta(self.config.hyperglycemia_min_day, unit="D")
         max_offset = pd.to_timedelta(self.config.hyperglycemia_max_day, unit="D")
         duration = pd.to_timedelta(self.config.hyperglycemia_duration_hours, unit="h")
         for cohort_id, group in events.groupby(id_col):
-            start = inputs.cohort.loc[int(cohort_id), self._cohort_start_col()]
-            window_start = max(inputs.cohort.loc[int(cohort_id), "prediction_start"], start + min_offset)
-            window_end = min(inputs.cohort.loc[int(cohort_id), "prediction_end"], start + max_offset)
+            start = inputs.cohort.loc[str(cohort_id), self._cohort_start_col()]
+            window_start = max(inputs.cohort.loc[str(cohort_id), "prediction_start"], start + min_offset)
+            window_end = min(inputs.cohort.loc[str(cohort_id), "prediction_end"], start + max_offset)
             candidate = group[(group["charttime"] >= window_start) & (group["charttime"] < window_end)].dropna(subset=["value"]).sort_values("charttime")
             if self._has_persistent_high_glucose(candidate, duration):
-                positive.add(int(cohort_id))
+                positive.add(str(cohort_id))
         return self._labels_from_sets(inputs.cohort, positive, prior, definition)
 
     def _has_persistent_high_glucose(self, glucose_events: pd.DataFrame, duration: pd.Timedelta) -> bool:
@@ -678,21 +733,21 @@ class MIMICIVMultiTargetAdapter:
             & (death < cohort["prediction_end"])
             & (death >= cohort[start_col] + pd.to_timedelta(48, unit="h"))
         )
-        positive = set(cohort.loc[positive_mask].index.astype(int))
-        prior = set(cohort.loc[death.notna() & (death < cohort["prediction_start"])].index.astype(int))
+        positive = set(cohort.loc[positive_mask].index.astype(str))
+        prior = set(cohort.loc[death.notna() & (death < cohort["prediction_start"])].index.astype(str))
         return self._labels_from_sets(cohort, positive, prior, f"Death in prediction window and at least 48h after {self.config.cohort_level} start")
 
     def _infection_target(self, inputs: _TargetInputs) -> tuple[pd.DataFrame, dict[str, Any]]:
         signs = self._infection_sign_events(inputs)
         cultures = self._culture_events_any_time(inputs.micro, inputs.cohort)
-        positive: set[int] = set()
-        id_col = self._cohort_id_col()
-        prior: set[int] = set(signs.loc[signs["charttime"] < signs["prediction_start"], id_col].astype(int)) if not signs.empty else set()
+        positive: set[str] = set()
+        id_col = "_instance_id"
+        prior: set[str] = set(signs.loc[signs["charttime"] < signs["prediction_start"], id_col].astype(str)) if not signs.empty else set()
         if not signs.empty and not cultures.empty:
             pred_signs = signs[(signs["charttime"] >= signs["prediction_start"]) & (signs["charttime"] < signs["prediction_end"])]
-            culture_groups = {int(cohort_id): group.sort_values("charttime") for cohort_id, group in cultures.groupby(id_col)}
+            culture_groups = {str(cohort_id): group.sort_values("charttime") for cohort_id, group in cultures.groupby(id_col)}
             for _, sign in pred_signs.sort_values("charttime").iterrows():
-                group = culture_groups.get(int(sign[id_col]))
+                group = culture_groups.get(str(sign[id_col]))
                 if group is None:
                     continue
                 has_culture = (
@@ -700,7 +755,7 @@ class MIMICIVMultiTargetAdapter:
                     & (group["charttime"] <= sign["charttime"] + pd.to_timedelta(24, unit="h"))
                 ).any()
                 if has_culture:
-                    positive.add(int(sign[id_col]))
+                    positive.add(str(sign[id_col]))
         return self._labels_from_sets(
             inputs.cohort,
             positive,
@@ -721,7 +776,7 @@ class MIMICIVMultiTargetAdapter:
                 celsius_max=self.config.temperature_celsius_max,
             )
             fever_rows = []
-            id_col = self._cohort_id_col()
+            id_col = "_instance_id"
             for _, group in temp.dropna(subset=["value"]).groupby(id_col):
                 group = group.sort_values("charttime")
                 for _, row in group.iterrows():
@@ -745,7 +800,7 @@ class MIMICIVMultiTargetAdapter:
                 leukopenia["sign"] = "leukopenia"
                 pieces.append(leukopenia[self._event_identity_columns("charttime", "prediction_start", "prediction_end", "sign")])
             for _, row in wbc[wbc["value"] > self.config.leukocytosis_threshold].sort_values("charttime").iterrows():
-                group = wbc[wbc[self._cohort_id_col()] == row[self._cohort_id_col()]]
+                group = wbc[wbc["_instance_id"] == row["_instance_id"]]
                 prior = group[(group["charttime"] >= row["charttime"] - pd.to_timedelta(48, unit="h")) & (group["charttime"] < row["charttime"])]
                 if prior.empty or (prior["value"] <= self.config.leukocytosis_threshold).all():
                     leukocytosis_rows.append(row)
@@ -781,7 +836,6 @@ class MIMICIVMultiTargetAdapter:
             .str.lower()
         )
         out = frame[text.str.contains("blood|urine", regex=True, na=False)].copy()
-        out[self._cohort_id_col()] = out["_cohort_id"].astype(int)
         return out[self._event_identity_columns("charttime")]
 
     def _hypotension_target(self, inputs: _TargetInputs) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -801,26 +855,27 @@ class MIMICIVMultiTargetAdapter:
         events = self._attach_window(events, inputs.cohort)
         events["value"] = pd.to_numeric(events["valuenum"], errors="coerce")
         outcome = events[(events["charttime"] >= events["prediction_start"]) & (events["charttime"] < events["prediction_end"])]
-        id_col = self._cohort_id_col()
-        measured = set(outcome[id_col].astype(int))
+        id_col = "_instance_id"
+        measured = set(outcome[id_col].astype(str))
         systolic_low = outcome["itemid"].isin(systolic_itemids) & (outcome["value"] < self.config.hypotension_systolic_threshold)
         diastolic_low = outcome["itemid"].isin(diastolic_itemids) & (outcome["value"] < self.config.hypotension_diastolic_threshold)
-        positive = set(outcome.loc[systolic_low | diastolic_low, id_col].astype(int))
+        positive = set(outcome.loc[systolic_low | diastolic_low, id_col].astype(str))
         return self._labels_from_outcomes(inputs.cohort, positive, measured, definition)
 
     def _labels_from_sets(
         self,
         cohort: pd.DataFrame,
-        positive: set[int],
-        excluded_prior: set[int],
+        positive: set[str],
+        excluded_prior: set[str],
         definition: str,
     ) -> tuple[pd.DataFrame, dict[str, Any]]:
         rows = []
-        for hadm_id in cohort.index:
-            if int(hadm_id) in excluded_prior:
+        for instance_id, row in cohort.iterrows():
+            instance_id = str(instance_id)
+            if instance_id in excluded_prior:
                 continue
-            rows.append({"patient_id": str(int(hadm_id)), "label": "true" if int(hadm_id) in positive else "false"})
-        labels = pd.DataFrame(rows, columns=["patient_id", "label"])
+            rows.append(self._label_row(instance_id, row, instance_id in positive))
+        labels = pd.DataFrame(rows, columns=self._label_columns(cohort))
         metadata = {
             "target_definition": definition,
             "excluded_prior_positive": len(excluded_prior),
@@ -831,17 +886,17 @@ class MIMICIVMultiTargetAdapter:
     def _labels_from_outcomes(
         self,
         cohort: pd.DataFrame,
-        positive: set[int],
-        measured: set[int],
+        positive: set[str],
+        measured: set[str],
         definition: str,
     ) -> tuple[pd.DataFrame, dict[str, Any]]:
         rows = []
-        for cohort_id in cohort.index:
-            cohort_id = int(cohort_id)
-            if self.config.require_outcome_measurement and cohort_id not in measured:
+        for instance_id, row in cohort.iterrows():
+            instance_id = str(instance_id)
+            if self.config.require_outcome_measurement and instance_id not in measured:
                 continue
-            rows.append({"patient_id": str(cohort_id), "label": "true" if cohort_id in positive else "false"})
-        labels = pd.DataFrame(rows, columns=["patient_id", "label"])
+            rows.append(self._label_row(instance_id, row, instance_id in positive))
+        labels = pd.DataFrame(rows, columns=self._label_columns(cohort))
         metadata = {
             "target_definition": definition,
             "required_outcome_measurement": self.config.require_outcome_measurement,
@@ -850,13 +905,26 @@ class MIMICIVMultiTargetAdapter:
         }
         return labels, metadata
 
+    def _label_columns(self, cohort: pd.DataFrame) -> list[str]:
+        if (cohort["_instance_id"].astype(str) != cohort["source_cohort_id"].astype(str)).any():
+            return ["patient_id", "label", "source_cohort_id", "window_index", "window_start_hours"]
+        return ["patient_id", "label"]
+
+    def _label_row(self, instance_id: str, cohort_row: pd.Series, positive: bool) -> dict[str, Any]:
+        result = {
+            "patient_id": instance_id,
+            "label": "true" if positive else "false",
+        }
+        if instance_id != str(cohort_row["source_cohort_id"]):
+            result.update(
+                source_cohort_id=str(cohort_row["source_cohort_id"]),
+                window_index=int(cohort_row["window_index"]),
+                window_start_hours=float(cohort_row["window_start_hours"]),
+            )
+        return result
+
     def _attach_window(self, events: pd.DataFrame, cohort: pd.DataFrame) -> pd.DataFrame:
-        frame = self._attach_cohort_for_records(events, cohort, "charttime", through_prediction=True)
-        if frame.empty:
-            return frame
-        id_col = self._cohort_id_col()
-        frame[id_col] = frame["_cohort_id"].astype(int)
-        return frame
+        return self._attach_cohort_for_records(events, cohort, "charttime", through_prediction=True)
 
     def _attach_cohort_for_records(
         self,
@@ -868,40 +936,62 @@ class MIMICIVMultiTargetAdapter:
     ) -> pd.DataFrame:
         if events.empty:
             return events.copy()
+        if "window_index" in cohort.columns and cohort["window_index"].nunique() > 1:
+            attached = [
+                self._attach_cohort_for_records(
+                    events,
+                    instance_cohort,
+                    time_col,
+                    through_prediction=through_prediction,
+                )
+                for _, instance_cohort in cohort.groupby("window_index", sort=True)
+            ]
+            nonempty = [frame for frame in attached if not frame.empty]
+            return pd.concat(nonempty, ignore_index=True) if nonempty else events.iloc[0:0].copy()
         start_col = self._cohort_start_col()
+        join_cols = [
+            "_instance_id",
+            "source_cohort_id",
+            "window_index",
+            "window_start_hours",
+            self._cohort_id_col(),
+            "hadm_id",
+            start_col,
+            "observation_start",
+            "observation_end",
+            "prediction_start",
+            "prediction_end",
+        ]
+        cohort_join = cohort.reset_index(drop=True)[list(dict.fromkeys(join_cols))]
         if self.config.cohort_level == "icu" and "stay_id" in events.columns:
-            direct = events[events["stay_id"].notna() & events["stay_id"].isin(cohort.index)].copy()
+            direct = events[events["stay_id"].notna()].copy()
             frames = []
             if not direct.empty:
-                direct["_cohort_id"] = direct["stay_id"].astype(int)
-                direct["_cohort_start"] = direct["_cohort_id"].map(cohort[start_col])
-                direct["observation_end"] = direct["_cohort_id"].map(cohort["observation_end"])
-                direct["prediction_start"] = direct["_cohort_id"].map(cohort["prediction_start"])
-                direct["prediction_end"] = direct["_cohort_id"].map(cohort["prediction_end"])
-                frames.append(direct)
+                direct = direct.merge(cohort_join, on=["stay_id", "hadm_id"], how="inner", suffixes=("", "_cohort"))
+                if not direct.empty:
+                    direct["_cohort_start"] = direct["observation_start"]
+                    direct["_filter_start"] = direct[start_col]
+                    frames.append(direct)
             indirect = events[events["stay_id"].isna()].copy()
             if not indirect.empty:
                 indirect = indirect.drop(columns=["stay_id"])
-                join_cols = [self._cohort_id_col(), "hadm_id", start_col, "observation_end", "prediction_start", "prediction_end"]
-                cohort_join = cohort.reset_index()[list(dict.fromkeys(join_cols))]
                 indirect = indirect.merge(cohort_join, on="hadm_id", how="inner")
                 if not indirect.empty:
-                    indirect["_cohort_id"] = indirect[self._cohort_id_col()].astype(int)
-                    indirect["_cohort_start"] = indirect[start_col]
+                    indirect["_cohort_start"] = indirect["observation_start"]
+                    indirect["_filter_start"] = indirect[start_col]
                     frames.append(indirect)
             frame = pd.concat(frames, ignore_index=True) if frames else events.iloc[0:0].copy()
         else:
-            join_cols = [self._cohort_id_col(), "hadm_id", start_col, "observation_end", "prediction_start", "prediction_end"]
-            cohort_join = cohort.reset_index()[list(dict.fromkeys(join_cols))]
             frame = events.merge(cohort_join, on="hadm_id", how="inner")
             if frame.empty:
                 return frame
-            frame["_cohort_id"] = frame[self._cohort_id_col()].astype(int)
-            frame["_cohort_start"] = frame[start_col]
+            frame["_cohort_start"] = frame["observation_start"]
+            frame["_filter_start"] = frame[start_col]
         if frame.empty:
             return frame
         end = frame["prediction_end"] if through_prediction else frame["observation_end"]
-        return frame[(frame[time_col] >= frame["_cohort_start"]) & (frame[time_col] < end)].copy()
+        start = frame["_filter_start"] if through_prediction else frame["_cohort_start"]
+        return frame[(frame[time_col] >= start) & (frame[time_col] < end)].copy()
 
     def _cohort_id_col(self) -> str:
         return "stay_id" if self.config.cohort_level == "icu" else "hadm_id"
@@ -913,7 +1003,7 @@ class MIMICIVMultiTargetAdapter:
         return "outtime" if self.config.cohort_level == "icu" else "dischtime"
 
     def _event_identity_columns(self, *columns: str) -> list[str]:
-        return list(dict.fromkeys([self._cohort_id_col(), "hadm_id", *columns]))
+        return list(dict.fromkeys(["_instance_id", self._cohort_id_col(), "hadm_id", *columns]))
 
     def _relative_timestamp(self, event_time: pd.Series, start_time: pd.Series) -> pd.Series:
         elapsed = event_time - start_time
@@ -960,8 +1050,15 @@ class MIMICIVMultiTargetAdapter:
                 "target": target,
                 "source": str(self.config.mimic_path),
                 "cohort_level": self.config.cohort_level,
-                "patient_id": self._cohort_id_col(),
+                "patient_id": "window_instance_id" if window.timeline_horizon_hours is not None else self._cohort_id_col(),
                 "patient_id_source": self._cohort_id_col(),
+                "window_generation": {
+                    "mode": "repeated" if window.timeline_horizon_hours is not None else "single",
+                    "timeline_horizon_hours": window.timeline_horizon_hours,
+                    "window_stride_hours": window.window_stride_hours,
+                    "n_instances": int(len(cohort)),
+                    "n_source_cohorts": int(cohort["source_cohort_id"].nunique()),
+                },
                 "time_axis": self._time_axis_description(),
                 "window": asdict(window),
                 "config": asdict(self.config),

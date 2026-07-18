@@ -55,6 +55,7 @@ MIMIC_SETTINGS = {
     "hypotension_diastolic_threshold": 60.0,
     "chunk_size": 1_000_000,
     "cache_dir": ROOT / "data" / "mimic_targets" / "cache",
+    "logs_dir": ROOT / "logs",
     "use_extracted_files": True,
     "use_filtered_cache": True,
     "progress_interval_chunks": 1,

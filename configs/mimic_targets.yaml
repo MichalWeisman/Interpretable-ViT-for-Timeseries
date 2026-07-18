@@ -4,6 +4,7 @@
 mimic_path: mimic-iv-3.1.zip
 output_dir: data/mimic_targets
 cache_dir: data/mimic_targets/cache
+logs_dir: logs
 cohort_level: icu
 chunk_size: 1000000
 use_extracted_files: true
@@ -137,3 +138,10 @@ windows:
     observation_hours: 24
     prediction_hours: 8
     gap_hours: 2
+  # Opt-in repeated-window example (uncomment to enable):
+  # - name: rolling_obs4_target2_horizon24_stride4
+  #   observation_hours: 4
+  #   prediction_hours: 2
+  #   gap_hours: 0
+  #   timeline_horizon_hours: 24
+  #   window_stride_hours: 4

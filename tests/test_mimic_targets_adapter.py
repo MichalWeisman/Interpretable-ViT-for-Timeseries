@@ -161,6 +161,7 @@ def _config(zip_path, tmp_path, *, windows=None, targets=None, cohort_level="adm
     config.mimic_path = zip_path
     config.output_dir = tmp_path / "out"
     config.cache_dir = tmp_path / "cache"
+    config.logs_dir = tmp_path / "logs"
     config.cohort_level = cohort_level
     config.windows = windows or [TargetWindowConfig(name="wide", observation_hours=48, prediction_hours=96, gap_hours=0)]
     config.targets = targets or [
@@ -238,6 +239,97 @@ def test_mimic_target_windows_support_optional_gap(tmp_path):
     assert _labels(datasets[("gap8", "hypoglycemia")])["20"] == "false"
 
 
+def test_repeated_timeline_window_creates_complete_instances_and_reanchors_records(tmp_path):
+    zip_path = _mini_mimic_zip(tmp_path)
+    window = TargetWindowConfig(
+        name="rolling24",
+        observation_hours=4,
+        prediction_hours=2,
+        gap_hours=0,
+        timeline_horizon_hours=24,
+        window_stride_hours=4,
+    )
+    dataset = MIMICIVMultiTargetAdapter(
+        _config(zip_path, tmp_path, windows=[window], targets=["hypoglycemia"])
+    ).prepare_all()[("rolling24", "hypoglycemia")]
+
+    admission_22 = dataset.labels[dataset.labels["source_cohort_id"] == "22"]
+    assert admission_22["window_start_hours"].tolist() == [0.0, 4.0, 8.0, 12.0, 16.0]
+    assert admission_22["patient_id"].tolist() == [f"22__window_{index}" for index in range(5)]
+    assert admission_22.set_index("window_index")["label"].to_dict() == {
+        0: "false", 1: "false", 2: "false", 3: "false", 4: "true"
+    }
+    window_one_records = dataset.records[dataset.records["patient_id"] == "10__window_1"]
+    assert set(window_one_records["timestamp"]) == {"2000-01-01 00:00:00", "2000-01-01 01:00:00"}
+    generation = dataset.metadata["window_generation"]
+    assert generation == {
+        "mode": "repeated",
+        "timeline_horizon_hours": 24,
+        "window_stride_hours": 4,
+        "n_instances": 65,
+        "n_source_cohorts": 13,
+    }
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        TargetWindowConfig("missing_stride", 4, 2, 0, timeline_horizon_hours=24),
+        TargetWindowConfig("too_short", 4, 2, 1, timeline_horizon_hours=6, window_stride_hours=2),
+        TargetWindowConfig("bad_stride", 4, 2, 0, timeline_horizon_hours=24, window_stride_hours=0),
+    ],
+)
+def test_repeated_timeline_window_validates_configuration(tmp_path, window):
+    zip_path = _mini_mimic_zip(tmp_path)
+    adapter = MIMICIVMultiTargetAdapter(_config(zip_path, tmp_path, windows=[window], targets=["hypoglycemia"]))
+    with pytest.raises(ValueError):
+        adapter.prepare_all()
+
+
+@pytest.mark.parametrize(
+    ("stride", "expected_offsets"),
+    [
+        (3, [0.0, 3.0, 6.0, 9.0, 12.0, 15.0]),
+        (7, [0.0, 7.0, 14.0]),
+    ],
+)
+def test_repeated_timeline_supports_overlapping_separated_and_non_divisible_windows(tmp_path, stride, expected_offsets):
+    zip_path = _mini_mimic_zip(tmp_path)
+    adapter = MIMICIVMultiTargetAdapter(_config(zip_path, tmp_path, targets=["hypoglycemia"]))
+    base = pd.DataFrame(
+        [[1, "2100-01-01", "2100-01-02"]],
+        columns=["subject_id", "admittime", "dischtime"],
+        index=pd.Index([10], name="hadm_id"),
+    )
+    base[["admittime", "dischtime"]] = base[["admittime", "dischtime"]].apply(pd.to_datetime)
+    window = TargetWindowConfig("rolling", 4, 2, 0, timeline_horizon_hours=23, window_stride_hours=stride)
+
+    cohort = adapter._windowed_cohort(base, window)
+
+    assert cohort["window_start_hours"].tolist() == expected_offsets
+
+
+def test_repeated_timeline_applies_full_window_rule_per_instance(tmp_path):
+    zip_path = _mini_mimic_zip(tmp_path)
+    config = _config(zip_path, tmp_path, targets=["hypoglycemia"])
+    adapter = MIMICIVMultiTargetAdapter(config)
+    base = pd.DataFrame(
+        [[1, "2100-01-01 00:00:00", "2100-01-01 05:00:00"]],
+        columns=["subject_id", "admittime", "dischtime"],
+        index=pd.Index([10], name="hadm_id"),
+    )
+    base[["admittime", "dischtime"]] = base[["admittime", "dischtime"]].apply(pd.to_datetime)
+    window = TargetWindowConfig("rolling", 4, 2, 0, timeline_horizon_hours=12, window_stride_hours=4)
+
+    config.require_full_window = False
+    partial = adapter._windowed_cohort(base, window)
+    assert partial.index.tolist() == ["10__window_0"]
+    assert partial.iloc[0]["prediction_end"] == pd.Timestamp("2100-01-01 05:00:00")
+
+    config.require_full_window = True
+    assert adapter._windowed_cohort(base, window).empty
+
+
 def test_mimic_target_records_standardize_units_and_event_variables(tmp_path):
     zip_path = _mini_mimic_zip(tmp_path)
     dataset = MIMICIVMultiTargetAdapter(_config(zip_path, tmp_path, targets=["hypoglycemia"])).prepare_all()[("wide", "hypoglycemia")]
@@ -248,6 +340,21 @@ def test_mimic_target_records_standardize_units_and_event_variables(tmp_path):
     assert set(records.loc[records["variable"].isin(["blood_culture", "urine_culture", "antibiotics"]), "value"]) == {1.0}
     assert dataset.metadata["patient_id"] == "hadm_id"
     assert dataset.metadata["window"]["name"] == "wide"
+
+
+def test_save_all_writes_timestamped_dataset_creation_log(tmp_path):
+    zip_path = _mini_mimic_zip(tmp_path)
+    config = _config(zip_path, tmp_path, targets=["hypoglycemia"])
+
+    outputs = MIMICIVMultiTargetAdapter(config).save_all()
+
+    assert outputs[("wide", "hypoglycemia")].exists()
+    log_files = list((tmp_path / "logs" / "dataset_creation").glob("*/*.log"))
+    assert len(log_files) == 1
+    log_text = log_files[0].read_text(encoding="utf-8")
+    assert "Started dataset_creation process" in log_text
+    assert "Created 1 MIMIC target datasets" in log_text
+    assert "Finished dataset_creation process" in log_text
 
 
 def test_mimic_target_records_and_threshold_labels_drop_implausible_values(tmp_path):

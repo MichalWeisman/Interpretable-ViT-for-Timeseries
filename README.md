@@ -207,8 +207,11 @@ These are source CSVs, not tensors. Run `tsvit prepare-data` before training.
 | `mimic_path` | Path to the MIMIC-IV zip archive or extracted directory. |
 | `output_dir` | Root directory for prepared target folders. |
 | `cache_dir` | Disposable cache for extracted raw tables and filtered Parquet files. |
+| `logs_dir` | Root for timestamped process logs; dataset creation logs are stored below `<logs_dir>/dataset_creation/<date>/`. Set to `null` to disable file logging. |
 | `cohort_level` | `admission` for `hadm_id` examples or `icu` for `stay_id` examples. |
 | `windows` | Observation, optional gap, and prediction windows in hours. |
+| `timeline_horizon_hours` | Optional elapsed-time horizon for generating repeated complete instances. |
+| `window_stride_hours` | Optional interval between repeated observation-window starts; must be used with `timeline_horizon_hours`. |
 | `chunk_size` | Number of rows per raw MIMIC chunk read. |
 | `use_extracted_files` | Copies selected `.csv.gz` files out of the zip for faster repeated reads. |
 | `use_filtered_cache` | Reuses filtered Parquet event tables when compatible. |
@@ -229,6 +232,12 @@ windows:
     observation_hours: 24
     prediction_hours: 8
     gap_hours: 2
+  - name: rolling_obs4_target2_horizon24_stride4
+    observation_hours: 4
+    prediction_hours: 2
+    gap_hours: 0
+    timeline_horizon_hours: 24
+    window_stride_hours: 4
 ```
 
 For each window:
@@ -236,10 +245,14 @@ For each window:
 - `observation_hours` is the history written into `records.csv`.
 - `gap_hours` is the delay between the observation window and the prediction window.
 - `prediction_hours` is the future interval used to assign the target label.
+- When `timeline_horizon_hours` and `window_stride_hours` are present, the adapter creates repeated fixed-length instances. Only instances whose complete observation, gap, and prediction sequence fits inside the horizon are created. For the rolling example above, starts at hours 0, 4, 8, 12, and 16 create five instances.
+- Repeated instances use IDs such as `12345__window_0`. Their labels also include `source_cohort_id`, `window_index`, and `window_start_hours`; tensor preparation keeps all instances from one source admission or ICU stay in the same split.
 
 MIMIC target names and target thresholds live in `src/interpretable_ts_vit/datasets/mimic/mimic_targets.py`. Per-target variable mappings live under `target_variables` in `configs/datasets/mimic/targets.yaml`; use `notebooks/mimic_targets/mimic_general_item_exploration.ipynb` to review candidates and write the selected IDs into the config.
 
 The adapter resolves dictionaries from MIMIC metadata tables when available. Generated `dataset_metadata.json` records the resolved mappings, source tables, target definition, label counts, and cohort-level details.
+
+Each dataset-creation run writes a separate timestamped log, for example `logs/dataset_creation/2026-07-18/dataset_creation_20260718T143012_123456+0300.log`. The process-first directory layout is shared infrastructure: future training, explanation, or reporting logs can use sibling directories without mixing unrelated runs.
 
 ## One-File Workflow
 

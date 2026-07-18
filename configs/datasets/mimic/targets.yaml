@@ -1,6 +1,7 @@
-mimic_path: mimic-iv-3.1.zip
+mimic_path: /home/michalwe/physionet.org/files/mimiciv/3.1
 output_dir: data/mimic_targets
 cache_dir: data/mimic_targets/cache
+logs_dir: logs
 cohort_level: icu
 chunk_size: 1000000
 use_extracted_files: true
@@ -364,11 +365,15 @@ target_variables:
       lactated_ringers:
       - 225828
 windows:
-- name: obs24_target8_gap0
-  observation_hours: 24
-  prediction_hours: 8
+- name: rolling_obs6_target2_gap0_horizon24_stride6
+  observation_hours: 6
+  prediction_hours: 2
   gap_hours: 0
-- name: obs24_target8_gap2
-  observation_hours: 24
-  prediction_hours: 8
-  gap_hours: 2
+  timeline_horizon_hours: 24
+  window_stride_hours: 6
+- name: rolling_obs6_target2_gap1_horizon24_stride6
+  observation_hours: 6
+  prediction_hours: 2
+  gap_hours: 1
+  timeline_horizon_hours: 24
+  window_stride_hours: 6

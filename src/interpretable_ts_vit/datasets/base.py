@@ -23,6 +23,8 @@ class TargetWindowConfig:
     observation_hours: float = 48.0
     prediction_hours: float = 24.0
     gap_hours: float = 0.0
+    timeline_horizon_hours: float | None = None
+    window_stride_hours: float | None = None
 
 
 @dataclass

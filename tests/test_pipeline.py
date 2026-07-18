@@ -1,4 +1,5 @@
 import pandas as pd
+import json
 
 from interpretable_ts_vit.config import ClusterConfig, Config, DataConfig, ModelConfig, TrainConfig
 from interpretable_ts_vit.binning import TimeSeriesBinner
@@ -81,3 +82,38 @@ def test_mimic_target_tensor_preparation_infers_yaml_variable_filter(tmp_path):
 
     binner = TimeSeriesBinner.load(tmp_path / "processed" / "binner.json")
     assert binner.variable_vocab_ == ["blood_glucose"]
+
+
+def test_tensor_preparation_keeps_source_cohort_windows_in_one_split(tmp_path):
+    labels = []
+    records = []
+    for cohort in range(12):
+        for window in range(3):
+            patient_id = f"c{cohort}__window_{window}"
+            labels.append({
+                "patient_id": patient_id,
+                "label": "true" if (cohort + window) % 3 == 0 else "false",
+                "source_cohort_id": f"c{cohort}",
+            })
+            records.append({"patient_id": patient_id, "variable": "hr", "value": 70, "timestamp": "2026-01-01 00:00:00"})
+    records_path = tmp_path / "records.csv"
+    labels_path = tmp_path / "labels.csv"
+    pd.DataFrame(records).to_csv(records_path, index=False)
+    pd.DataFrame(labels).to_csv(labels_path, index=False)
+
+    output = tmp_path / "processed"
+    _prepare_tensor_splits(
+        records_path,
+        labels_path,
+        Config(data=DataConfig(granularity="1h", time_start="2026-01-01", time_end="2026-01-02")),
+        output,
+    )
+
+    splits = json.loads((output / "splits.json").read_text(encoding="utf-8"))
+    owner = {}
+    for split, instance_ids in splits.items():
+        for instance_id in instance_ids:
+            cohort_id = instance_id.split("__window_")[0]
+            assert cohort_id not in owner or owner[cohort_id] == split
+            owner[cohort_id] = split
+    assert set(owner) == {f"c{cohort}" for cohort in range(12)}
