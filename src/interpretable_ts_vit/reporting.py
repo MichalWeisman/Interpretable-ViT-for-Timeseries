@@ -130,6 +130,7 @@ def experiment_report_payload(
         "run_dir": str(run_dir),
         "dataset_dir": None if dataset_dir is None else str(dataset_dir),
         "configuration": configuration_summary(run_dir, binner, dataset_metadata, split),
+        "data_summary": data_summary(run_dir, binner, dataset_metadata),
         "metrics": metrics_summary(run_dir, split),
         "statistics": statistics_summary(run_dir, split),
         "variable_details": [variable_detail_payload(variable, display_metadata, normal_ranges) for variable in variables],
@@ -172,7 +173,7 @@ def class_pattern_payloads(
             continue
         indices = [patient_to_index[patient_id] for patient_id in class_patient_ids]
         value_matrix = nanmean_without_warning(values[indices], axis=0)
-        importance_matrix = mean_importance_for_patient_ids(explanations_dir, class_patient_ids)
+        importance_matrix = mean_importance_for_patient_ids(explanations_dir, class_patient_ids, expected_shape=value_matrix.shape)
         sparse_values, top_mask = top_importance_sparse_values(value_matrix, importance_matrix, top_importance_fraction)
         ordered_values = sparse_values[row_indices]
         ordered_importance = importance_matrix[row_indices]
@@ -208,7 +209,11 @@ def dataset_value_tensor_for_similarity(dataset, binner: TimeSeriesBinner, value
     raise ValueError("value_scale must be 'raw' or 'z_score'.")
 
 
-def mean_importance_for_patient_ids(explanations_dir: str | Path, patient_ids: Sequence[str]) -> np.ndarray:
+def mean_importance_for_patient_ids(
+    explanations_dir: str | Path,
+    patient_ids: Sequence[str],
+    expected_shape: tuple[int, int] | None = None,
+) -> np.ndarray:
     """Mean explanation matrix for patients with available `.npy` explanations."""
     total = None
     count = 0
@@ -218,11 +223,28 @@ def mean_importance_for_patient_ids(explanations_dir: str | Path, patient_ids: S
         if not path.exists():
             continue
         matrix = np.load(path).astype(np.float64)
+        if expected_shape is not None:
+            matrix = normalize_importance_shape(matrix, expected_shape)
         total = matrix if total is None else total + matrix
         count += 1
     if count == 0:
         raise ValueError("No explanation matrices found for the requested patients.")
     return total / count
+
+
+def normalize_importance_shape(matrix: np.ndarray, expected_shape: tuple[int, int]) -> np.ndarray:
+    """Adapt compatible legacy explanation shapes to `[variables, time_bins]`."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    expected_rows, expected_cols = expected_shape
+    if matrix.shape == expected_shape:
+        return matrix
+    if matrix.ndim != 2:
+        raise ValueError(f"Expected a 2D explanation matrix, got shape {matrix.shape}.")
+    rows, cols = matrix.shape
+    if rows == expected_rows and cols > expected_cols and cols % expected_cols == 0:
+        channel_count = cols // expected_cols
+        return matrix.reshape(rows, channel_count, expected_cols).mean(axis=1)
+    raise ValueError(f"Explanation matrix shape {matrix.shape} cannot be aligned to expected shape {expected_shape}.")
 
 
 def nanmean_without_warning(values: np.ndarray, axis: int = 0) -> np.ndarray:
@@ -354,22 +376,61 @@ def configuration_summary(run_dir: Path, binner: TimeSeriesBinner, dataset_metad
     cluster_metadata = _load_json(run_dir / "clusters" / split / "cluster_metadata.json")
     window = dataset_metadata.get("window", {}) if isinstance(dataset_metadata, Mapping) else {}
     target_metadata = dataset_metadata.get("target_metadata", {}) if isinstance(dataset_metadata, Mapping) else {}
+    has_cluster_assignments = (run_dir / "clusters" / split / "cluster_assignments.csv").exists()
+    cluster_method = cluster_metadata.get("clustering_method")
+    cluster_feature_mode = cluster_metadata.get("feature_mode")
+    clusters_used = cluster_metadata.get("n_clusters_used")
+    if not cluster_method:
+        cluster_method = "cluster assignments" if has_cluster_assignments else "predicted-class aggregate"
+    if not cluster_feature_mode:
+        cluster_feature_mode = "saved cluster assignments" if has_cluster_assignments else "predicted labels"
+    if clusters_used is None:
+        clusters_used = "from assignments" if has_cluster_assignments else "one pattern per predicted class"
     return {
-        "target": dataset_metadata.get("target", "not recorded") if isinstance(dataset_metadata, Mapping) else "not recorded",
-        "target_definition": target_metadata.get("target_definition", "not recorded") if isinstance(target_metadata, Mapping) else "not recorded",
-        "observation_hours": window.get("observation_hours", "not recorded") if isinstance(window, Mapping) else "not recorded",
-        "gap_hours": window.get("gap_hours", "not recorded") if isinstance(window, Mapping) else "not recorded",
-        "prediction_hours": window.get("prediction_hours", "not recorded") if isinstance(window, Mapping) else "not recorded",
+        "target": dataset_metadata.get("target", "—") if isinstance(dataset_metadata, Mapping) else "—",
+        "target_definition": target_metadata.get("target_definition", "—") if isinstance(target_metadata, Mapping) else "—",
+        "observation_hours": window.get("observation_hours", "—") if isinstance(window, Mapping) else "—",
+        "gap_hours": window.get("gap_hours", "—") if isinstance(window, Mapping) else "—",
+        "prediction_hours": window.get("prediction_hours", "—") if isinstance(window, Mapping) else "—",
         "binning_interval": binner.config.granularity,
         "time_bins": len(binner.time_bins_),
         "variables": len(binner.variable_vocab_),
-        "patch_size": model_config.get("patch_size", "not recorded"),
-        "embed_dim": model_config.get("embed_dim", "not recorded"),
-        "depth": model_config.get("depth", "not recorded"),
-        "num_heads": model_config.get("num_heads", "not recorded"),
-        "cluster_method": cluster_metadata.get("clustering_method", "not recorded"),
-        "cluster_feature_mode": cluster_metadata.get("feature_mode", "not recorded"),
-        "clusters_used": cluster_metadata.get("n_clusters_used", "not recorded"),
+        "patch_size": model_config.get("patch_size", "—"),
+        "embed_dim": model_config.get("embed_dim", "—"),
+        "depth": model_config.get("depth", "—"),
+        "num_heads": model_config.get("num_heads", "—"),
+        "cluster_method": cluster_method,
+        "cluster_feature_mode": cluster_feature_mode,
+        "clusters_used": clusters_used,
+    }
+
+
+def data_summary(run_dir: Path, binner: TimeSeriesBinner, dataset_metadata: Mapping[str, object]) -> dict[str, Any]:
+    """Concise dataset information for report review."""
+    split_counts: dict[str, int] = {}
+    for split in ["train", "val", "test"]:
+        split_path = run_dir / f"{split}.npz"
+        if split_path.exists():
+            split_counts[split] = int(len(load_split(split_path)))
+    labels = dataset_metadata.get("label_counts", {}) if isinstance(dataset_metadata, Mapping) else {}
+    labels = labels if isinstance(labels, Mapping) else {}
+    total_labels = sum(int(value) for value in labels.values()) if labels else 0
+    balance = [
+        {"label": str(label), "count": int(count), "fraction": (int(count) / total_labels if total_labels else None)}
+        for label, count in sorted(labels.items(), key=lambda item: str(item[0]))
+    ]
+    cohort_level = str(dataset_metadata.get("cohort_level", "patient")) if isinstance(dataset_metadata, Mapping) else "patient"
+    labeled_key = f"n_labeled_{cohort_level}s"
+    candidate_key = f"n_candidate_{cohort_level}s"
+    return {
+        "patients": dataset_metadata.get(labeled_key, dataset_metadata.get("n_labeled_patients")) if isinstance(dataset_metadata, Mapping) else None,
+        "candidate_patients": dataset_metadata.get(candidate_key) if isinstance(dataset_metadata, Mapping) else None,
+        "instances": int(sum(split_counts.values())) if split_counts else total_labels or None,
+        "records": dataset_metadata.get("n_records") if isinstance(dataset_metadata, Mapping) else None,
+        "variables": len(binner.variable_vocab_),
+        "time_bins": len(binner.time_bins_),
+        "class_balance": balance,
+        "split_counts": split_counts,
     }
 
 
@@ -482,20 +543,24 @@ def render_report_html(payload: Mapping[str, object]) -> str:
       <p id="subtitle"></p>
     </div>
     <div class="header-controls">
-      <select id="experimentSelect" aria-label="Experiment"></select>
       <button id="compareButton" type="button">Compare</button>
     </div>
   </header>
   <main>
-    <section id="experimentView" class="experiment-view"></section>
+    <section id="experimentView" class="experiment-view">
+      <div id="experimentTable"></div>
+      <div id="experimentDetail"></div>
+    </section>
     <section id="compareView" class="compare-view hidden">
-      <div class="compare-toolbar">
-        <select id="leftExperiment"></select>
-        <select id="rightExperiment"></select>
-      </div>
       <div class="compare-grid">
-        <div id="leftPane"></div>
-        <div id="rightPane"></div>
+        <div class="compare-selection-pane">
+          <div id="leftExperimentTable"></div>
+          <div id="leftPane"></div>
+        </div>
+        <div class="compare-selection-pane">
+          <div id="rightExperimentTable"></div>
+          <div id="rightPane"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -545,8 +610,35 @@ def _infer_dataset_dir_for_run(runs_root: Path, run_dir: Path, dataset_root: Pat
         relative = run_dir.relative_to(runs_root)
     except ValueError:
         return None
-    candidate = dataset_root / relative
-    return candidate if (candidate / "dataset_metadata.json").exists() else None
+    relatives = _dataset_relative_candidates(relative)
+    roots = [dataset_root]
+    if dataset_root.name == "processed":
+        roots.append(dataset_root.parent)
+    for root in roots:
+        for candidate_relative in relatives:
+            candidate = root / candidate_relative
+            if (candidate / "dataset_metadata.json").exists():
+                return candidate
+    return None
+
+
+def _dataset_relative_candidates(relative: Path) -> list[Path]:
+    """Return plausible dataset-relative paths for a report run path."""
+    candidates: list[Path] = []
+
+    def add(candidate: Path) -> None:
+        if str(candidate) != "." and candidate not in candidates:
+            candidates.append(candidate)
+
+    add(relative)
+    if len(relative.parts) > 1:
+        add(relative.parent)
+    if relative.parts and relative.parts[0] == "vit_baseline":
+        without_baseline = Path(*relative.parts[1:])
+        add(without_baseline)
+        if len(without_baseline.parts) > 1:
+            add(without_baseline.parent)
+    return candidates
 
 
 def _relative_run_name(runs_root: Path, run_dir: Path) -> str:
@@ -802,9 +894,8 @@ button, select { border: 1px solid var(--line); background: var(--panel); color:
 button { cursor: pointer; background: var(--accent); color: white; border-color: var(--accent); font-weight: 650; }
 main { padding: 22px; }
 .hidden { display: none !important; }
-.header-controls { display: flex; gap: 10px; align-items: center; min-width: min(620px, 52vw); }
-.header-controls select { flex: 1; min-width: 260px; }
-.experiment-view { display: block; }
+.header-controls { display: flex; gap: 10px; align-items: center; }
+.experiment-view { display: grid; gap: 16px; }
 .experiment-card, .compare-pane { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
 .table-grid { display: grid; gap: 14px; margin: 8px 0 16px; }
 .info-table, .stats-table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); background: white; font-size: 12px; }
@@ -838,21 +929,37 @@ main { padding: 22px; }
 .detail-meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
 .items { margin: 6px 0 0; padding-left: 18px; color: #344054; font-size: 12px; line-height: 1.35; }
 .missing-name { color: #9a3412; font-weight: 650; }
-.compare-toolbar { display: flex; gap: 12px; margin-bottom: 14px; }
-.compare-toolbar select { flex: 1; }
+.experiment-summary { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
+.experiment-summary h2 { margin-bottom: 4px; }
+.summary-help { margin-bottom: 10px; font-size: 12px; }
+.summary-table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; max-height: 54vh; }
+.experiment-metrics-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 980px; }
+.experiment-metrics-table th, .experiment-metrics-table td { border-top: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: middle; white-space: nowrap; }
+.experiment-metrics-table thead th { position: sticky; top: 0; z-index: 2; background: var(--soft); color: var(--muted); font-weight: 750; }
+.experiment-metrics-table thead tr.filter-row th { top: 29px; background: #fff; }
+.experiment-metrics-table input { width: 100%; min-width: 74px; border: 1px solid var(--line); border-radius: 5px; padding: 5px 6px; font: inherit; font-size: 11px; color: var(--ink); background: #fff; }
+.experiment-metrics-table tbody tr { cursor: pointer; }
+.experiment-metrics-table tbody tr:hover { background: #eefaf8; }
+.experiment-metrics-table tbody tr.selected { background: color-mix(in srgb, var(--accent), white 84%); outline: 2px solid color-mix(in srgb, var(--accent), white 25%); outline-offset: -2px; }
+.experiment-metrics-table .numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.compare-selection-pane { display: grid; gap: 12px; align-content: start; min-width: 0; }
 .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.compare-view .experiment-summary { padding: 12px; }
+.compare-view .summary-table-wrap { max-height: 34vh; }
+.compare-view .experiment-metrics-table { min-width: 900px; font-size: 11px; }
 .compare-pane .table-grid { grid-template-columns: 1fr; }
 .compare-pane .heatmap-wrap { max-height: 48vh; }
 .compare-pane .cell { min-width: 10px; }
 .compare-pane .row-label { font-size: 10px; }
-@media (max-width: 1100px) { .table-grid, .compare-grid { grid-template-columns: 1fr; } main { padding: 14px; } header { align-items: flex-start; flex-direction: column; } .header-controls { width: 100%; min-width: 0; } .header-controls select { min-width: 0; } }
+@media (max-width: 1100px) { .table-grid, .compare-grid { grid-template-columns: 1fr; } main { padding: 14px; } header { align-items: flex-start; flex-direction: column; } .header-controls { width: 100%; min-width: 0; } }
 """
 
 
 _REPORT_JS = r"""
 const payload = JSON.parse(document.getElementById('report-data').textContent);
-const fmt = (value, digits = 3) => value === null || value === undefined ? 'not recorded' : (typeof value === 'number' ? value.toFixed(digits).replace(/\.?0+$/, '') : String(value));
-const pct = value => value === null || value === undefined ? 'not recorded' : `${(value * 100).toFixed(1)}%`;
+const missingValue = '—';
+const fmt = (value, digits = 3) => value === null || value === undefined ? missingValue : (typeof value === 'number' ? value.toFixed(digits).replace(/\.?0+$/, '') : String(value));
+const pct = value => value === null || value === undefined ? missingValue : `${(value * 100).toFixed(1)}%`;
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
 
 document.getElementById('subtitle').textContent = `${payload.experiments.length} experiment${payload.experiments.length === 1 ? '' : 's'} · ${payload.split} split · top ${(payload.top_importance_fraction * 100).toFixed(0)}% importance cells`;
@@ -907,19 +1014,51 @@ function metricsTable(metrics) {
   return renderSingleRowTable('Test Results', columns, row);
 }
 
+function dataSummaryTable(summary) {
+  const row = {
+    patients: summary.patients,
+    instances: summary.instances,
+    records: summary.records,
+    variables: summary.variables,
+    time_bins: summary.time_bins,
+    class_balance: formatClassBalance(summary.class_balance),
+    split_counts: formatSplitCounts(summary.split_counts),
+  };
+  const columns = [
+    {key: 'patients', label: 'Patients'},
+    {key: 'instances', label: 'Instances'},
+    {key: 'records', label: 'Records'},
+    {key: 'variables', label: 'Variables'},
+    {key: 'time_bins', label: 'Time bins'},
+    {key: 'class_balance', label: 'Class balance'},
+    {key: 'split_counts', label: 'Train / Val / Test'},
+  ];
+  return renderSingleRowTable('Data Summary', columns, row);
+}
+
+function formatClassBalance(rows) {
+  if (!rows || rows.length === 0) return missingValue;
+  return rows.map(row => `${row.label}: ${fmt(row.count, 0)} (${pct(row.fraction)})`).join(' · ');
+}
+
+function formatSplitCounts(counts) {
+  if (!counts) return missingValue;
+  return ['train', 'val', 'test'].map(split => `${split}: ${fmt(counts[split], 0)}`).join(' / ');
+}
+
 function renderTables(experiment) {
-  return `<div class="table-grid">${configTable(experiment.configuration)}${metricsTable(experiment.metrics)}</div>`;
+  return `<div class="table-grid">${configTable(experiment.configuration)}${dataSummaryTable(experiment.data_summary || {})}${metricsTable(experiment.metrics)}</div>`;
 }
 
 function renderRecordTable(title, rows, columns, className = '') {
-  if (!rows || rows.length === 0) return `<div class="empty-note">${escapeHtml(title)}: not recorded.</div>`;
+  if (!rows || rows.length === 0) return `<div class="empty-note">${escapeHtml(title)}: ${missingValue}</div>`;
   return `<table class="stats-table ${className}"><caption>${escapeHtml(title)}</caption><thead><tr>${columns.map(col => `<th>${escapeHtml(col.label)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${columns.map(col => `<td>${escapeHtml(formatCell(row[col.key]))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 }
 
 function formatCell(value) {
   if (typeof value === 'boolean') return value ? 'True' : 'False';
   if (typeof value === 'number') return fmt(value, Math.abs(value) < 0.001 && value !== 0 ? 4 : 3);
-  return value ?? 'not recorded';
+  return value ?? missingValue;
 }
 
 function renderStatistics(experiment) {
@@ -962,7 +1101,7 @@ function cellTitle(pattern, variable, row, col) {
   const importance = pattern.importance[row][col];
   const status = pattern.range_status ? pattern.range_status[row][col] : null;
   const range = variable.normal_range;
-  const rangeText = range ? `${fmt(range.low)}-${fmt(range.high)}${range.unit ? ' ' + range.unit : ''}` : 'not recorded';
+  const rangeText = range ? `${fmt(range.low)}-${fmt(range.high)}${range.unit ? ' ' + range.unit : ''}` : missingValue;
   return `${variable.display_name}\nTime: ${pattern.time_bins[col]}\nValue: ${fmt(value)}\nImportance: ${fmt(importance)}\nClinical status: ${fmt(status)}\nNormal range: ${rangeText}\nGroup: ${variable.group_label}`;
 }
 
@@ -995,7 +1134,7 @@ function renderHeatmap(pattern) {
 function renderDetails(variables) {
   return `<div class="variable-description-grid">${variables.map(variable => {
     const range = variable.normal_range;
-    const rangeText = range ? `${fmt(range.low)}-${fmt(range.high)}${range.unit ? ' ' + escapeHtml(range.unit) : ''}` : 'not recorded';
+    const rangeText = range ? `${fmt(range.low)}-${fmt(range.high)}${range.unit ? ' ' + escapeHtml(range.unit) : ''}` : missingValue;
     const items = (variable.items || []).map(item => {
       const name = item.missing_name ? `<span class="missing-name">name unavailable</span>` : escapeHtml(item.name);
       return `<li>${name}${item.id ? ` (${escapeHtml(item.id)})` : ''}</li>`;
@@ -1028,43 +1167,133 @@ function renderExperiment(experiment, index, compact = false) {
   return `<article class="${compact ? 'compare-pane' : 'experiment-card'}"><h2>${escapeHtml(experiment.name)}</h2>${renderTables(experiment)}${renderStatistics(experiment)}${renderPatterns(experiment, `${compact ? 'cmp' : 'exp'}-${index}`)}</article>`;
 }
 
+const experimentMetricColumns = [
+  {key: 'target', label: 'Target', filter: true},
+  {key: 'observation', label: 'Obs h', filter: true, numeric: true},
+  {key: 'gap', label: 'Gap h', filter: true, numeric: true},
+  {key: 'prediction', label: 'Pred h', filter: true, numeric: true},
+  {key: 'patch_size', label: 'Patch', filter: true},
+  {key: 'variables', label: 'Vars', filter: true, numeric: true},
+  {key: 'accuracy', label: 'Accuracy', filter: true, numeric: true},
+  {key: 'macro_f1', label: 'Macro F1', filter: true, numeric: true},
+  {key: 'auc', label: 'AUROC', filter: true, numeric: true},
+  {key: 'tpr', label: 'TPR', filter: true, numeric: true},
+  {key: 'fpr', label: 'FPR', filter: true, numeric: true},
+  {key: 'ppv', label: 'PPV', filter: true, numeric: true},
+];
+
+function experimentMetricRow(experiment, index) {
+  const config = experiment.configuration || {};
+  const metrics = experiment.metrics || {};
+  return {
+    index,
+    target: config.target,
+    observation: config.observation_hours,
+    gap: config.gap_hours,
+    prediction: config.prediction_hours,
+    patch_size: Array.isArray(config.patch_size) ? config.patch_size.join(' x ') : config.patch_size,
+    variables: config.variables,
+    accuracy: metrics.accuracy,
+    macro_f1: metrics.macro_f1,
+    auc: metrics.auroc ?? metrics.auc,
+    tpr: metrics.tpr,
+    fpr: metrics.fpr,
+    ppv: metrics.ppv,
+  };
+}
+
+function filterableText(value) {
+  return formatCell(value).toLowerCase();
+}
+
+function renderExperimentMetricsTable(root, state, title) {
+  const rows = payload.experiments.map(experimentMetricRow);
+  const filters = state.filters || {};
+  const visibleRows = rows.filter(row => experimentMetricColumns.every(col => {
+    const needle = String(filters[col.key] || '').trim().toLowerCase();
+    return !needle || filterableText(row[col.key]).includes(needle);
+  }));
+  const filterCells = experimentMetricColumns.map(col => {
+    const value = escapeHtml(filters[col.key] || '');
+    return `<th><input data-filter-key="${escapeHtml(col.key)}" value="${value}" aria-label="Filter ${escapeHtml(col.label)}"></th>`;
+  }).join('');
+  const body = visibleRows.length
+    ? visibleRows.map(row => `<tr data-experiment-index="${row.index}" class="${row.index === state.selectedIndex ? 'selected' : ''}">${experimentMetricColumns.map(col => `<td class="${col.numeric ? 'numeric' : ''}">${escapeHtml(formatCell(row[col.key]))}</td>`).join('')}</tr>`).join('')
+    : `<tr><td colspan="${experimentMetricColumns.length}">No experiments match the active filters.</td></tr>`;
+  root.innerHTML = `<section class="experiment-summary"><h2>${escapeHtml(title)}</h2><p class="summary-help">Filter columns, then click a row to display that experiment.</p><div class="summary-table-wrap"><table class="experiment-metrics-table"><thead><tr>${experimentMetricColumns.map(col => `<th>${escapeHtml(col.label)}</th>`).join('')}</tr><tr class="filter-row">${filterCells}</tr></thead><tbody>${body}</tbody></table></div></section>`;
+  root.querySelectorAll('[data-filter-key]').forEach(input => {
+    input.addEventListener('input', () => {
+      const key = input.dataset.filterKey;
+      const cursor = input.selectionStart;
+      state.filters[key] = input.value;
+      renderExperimentMetricsTable(root, state, title);
+      const nextInput = root.querySelector(`[data-filter-key="${key}"]`);
+      if (nextInput) {
+        nextInput.focus();
+        if (cursor !== null) nextInput.setSelectionRange(cursor, cursor);
+      }
+    });
+  });
+  root.querySelectorAll('[data-experiment-index]').forEach(row => {
+    row.addEventListener('click', () => {
+      state.selectedIndex = Number(row.dataset.experimentIndex);
+      state.onSelect(state.selectedIndex);
+      renderExperimentMetricsTable(root, state, title);
+    });
+  });
+}
+
 const experimentView = document.getElementById('experimentView');
-const experimentSelect = document.getElementById('experimentSelect');
+const experimentTable = document.getElementById('experimentTable');
+const experimentDetail = document.getElementById('experimentDetail');
 
 const compareButton = document.getElementById('compareButton');
 const compareView = document.getElementById('compareView');
-const leftSelect = document.getElementById('leftExperiment');
-const rightSelect = document.getElementById('rightExperiment');
+const leftExperimentTable = document.getElementById('leftExperimentTable');
+const rightExperimentTable = document.getElementById('rightExperimentTable');
 const leftPane = document.getElementById('leftPane');
 const rightPane = document.getElementById('rightPane');
-payload.experiments.forEach((experiment, index) => {
-  experimentSelect.add(new Option(experiment.name, index));
-  leftSelect.add(new Option(experiment.name, index));
-  rightSelect.add(new Option(experiment.name, index));
-});
-rightSelect.value = String(Math.min(1, payload.experiments.length - 1));
 
-function renderSelectedExperiment() {
-  const index = Number(experimentSelect.value || 0);
-  experimentView.innerHTML = renderExperiment(payload.experiments[index], index, false);
-  attachTabs(experimentView);
+const singleState = {
+  selectedIndex: 0,
+  filters: {},
+  onSelect: renderSelectedExperiment,
+};
+const leftState = {
+  selectedIndex: 0,
+  filters: {},
+  onSelect: renderCompare,
+};
+const rightState = {
+  selectedIndex: Math.min(1, payload.experiments.length - 1),
+  filters: {},
+  onSelect: renderCompare,
+};
+
+function renderSelectedExperiment(index = singleState.selectedIndex) {
+  singleState.selectedIndex = index;
+  experimentDetail.innerHTML = renderExperiment(payload.experiments[index], index, false);
+  attachTabs(experimentDetail);
 }
-experimentSelect.addEventListener('change', renderSelectedExperiment);
+
 renderSelectedExperiment();
+renderExperimentMetricsTable(experimentTable, singleState, 'All Experiment Metrics');
 
 function renderCompare() {
-  leftPane.innerHTML = renderExperiment(payload.experiments[Number(leftSelect.value)], Number(leftSelect.value), true);
-  rightPane.innerHTML = renderExperiment(payload.experiments[Number(rightSelect.value)], Number(rightSelect.value), true);
+  leftPane.innerHTML = renderExperiment(payload.experiments[leftState.selectedIndex], leftState.selectedIndex, true);
+  rightPane.innerHTML = renderExperiment(payload.experiments[rightState.selectedIndex], rightState.selectedIndex, true);
   attachTabs(compareView);
 }
-leftSelect.addEventListener('change', renderCompare);
-rightSelect.addEventListener('change', renderCompare);
+
 compareButton.addEventListener('click', () => {
   const showing = !compareView.classList.contains('hidden');
   compareView.classList.toggle('hidden', showing);
   experimentView.classList.toggle('hidden', !showing);
-  experimentSelect.classList.toggle('hidden', !showing);
   compareButton.textContent = showing ? 'Compare' : 'Single View';
-  if (!showing) renderCompare();
+  if (!showing) {
+    renderExperimentMetricsTable(leftExperimentTable, leftState, 'Left Experiment Metrics');
+    renderExperimentMetricsTable(rightExperimentTable, rightState, 'Right Experiment Metrics');
+    renderCompare();
+  }
 });
 """

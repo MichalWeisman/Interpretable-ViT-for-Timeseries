@@ -14,6 +14,7 @@ from interpretable_ts_vit.reporting import (
     class_pattern_payloads,
     discover_experiment_specs,
     infer_variable_display_metadata,
+    normalize_importance_shape,
     order_variables,
     top_importance_sparse_values,
     write_mimic_variable_display_metadata,
@@ -106,6 +107,10 @@ def _make_synthetic_run(tmp_path, use_base_as_run_dir=False):
                 "target": "synthetic_target",
                 "window": {"name": "obs2_target1_gap0", "observation_hours": 2, "prediction_hours": 1, "gap_hours": 0},
                 "target_metadata": {"target_definition": "Synthetic event in prediction window"},
+                "cohort_level": "patient",
+                "n_labeled_patients": 4,
+                "n_records": 10,
+                "label_counts": {"false": 2, "true": 2},
                 "variable_mappings": {
                     "chart_itemids": {"heart_rate": [220045]},
                     "lab_itemids": {"blood_glucose": [50809]},
@@ -129,6 +134,19 @@ def test_top_importance_sparse_values_keeps_only_top_cells():
     assert np.isclose(sparse[1, 0], 3.0)
     assert np.isnan(sparse[1, 1])
     assert mask.tolist() == [[False, True], [True, False]]
+
+
+def test_normalize_importance_shape_averages_legacy_channel_time_blocks():
+    matrix = np.array(
+        [
+            [1.0, 3.0, 5.0, 7.0],
+            [2.0, 4.0, 6.0, 8.0],
+        ]
+    )
+
+    normalized = normalize_importance_shape(matrix, (2, 2))
+
+    np.testing.assert_allclose(normalized, np.array([[3.0, 5.0], [4.0, 6.0]]))
 
 
 def test_variable_grouping_orders_metadata_sources():
@@ -194,8 +212,20 @@ def test_build_experiment_report_writes_embedded_html(tmp_path):
     assert payload["experiments"][0]["name"] == "Synthetic"
     assert "Experiment Results" in text
     assert "Compare" in text
-    assert "experimentSelect" in text
+    assert "not recorded" not in text
+    assert "All Experiment Metrics" in text
+    assert "experiment-metrics-table" in text
+    assert "data-filter-key" in text
+    assert "renderExperimentMetricsTable" in text
+    assert "data-experiment-index" in text
+    assert "label: 'Experiment'" not in text
+    assert "leftExperimentTable" in text
+    assert "rightExperimentTable" in text
+    assert 'id="experimentSelect"' not in text
+    assert 'id="leftExperiment"' not in text
+    assert 'id="rightExperiment"' not in text
     assert "Configuration" in text
+    assert "Data Summary" in text
     assert "Test Results" in text
     assert "Pattern similarity statistical test" in text
     assert "Target definition" in text
@@ -207,6 +237,9 @@ def test_build_experiment_report_writes_embedded_html(tmp_path):
     assert "MIMIC" not in text
     assert payload["experiments"][0]["statistics"]["class_similarity_tests"][0]["is_significant"] is True
     assert payload["experiments"][0]["class_patterns"][0]["range_status"]
+    assert payload["experiments"][0]["data_summary"]["patients"] == 4
+    assert payload["experiments"][0]["data_summary"]["records"] == 10
+    assert payload["experiments"][0]["data_summary"]["class_balance"][0]["label"] == "false"
 
 
 def test_mimic_dictionary_metadata_writes_item_names_and_missing_markers(tmp_path):
@@ -280,6 +313,50 @@ def test_discover_experiment_specs_matches_dataset_root_by_relative_path(tmp_pat
     assert specs[0].run_dir == run_dir
     assert specs[0].dataset_dir == matched_dataset_dir
     assert specs[0].name == "obs24_target8_gap0/hypotension"
+
+
+def test_discover_experiment_specs_matches_patch_run_to_parent_dataset_dir(tmp_path):
+    runs_root = tmp_path / "runs_root"
+    dataset_root = tmp_path / "dataset_root"
+    run_dir, dataset_dir, _, _ = _make_synthetic_run(
+        runs_root / "rolling_obs6_target2_gap1_horizon24_stride6" / "hypotension" / "patch30x1",
+        use_base_as_run_dir=True,
+    )
+    matched_dataset_dir = dataset_root / "rolling_obs6_target2_gap1_horizon24_stride6" / "hypotension"
+    matched_dataset_dir.mkdir(parents=True)
+    matched_dataset_dir.joinpath("dataset_metadata.json").write_text(
+        dataset_dir.joinpath("dataset_metadata.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    specs = discover_experiment_specs(runs_root, dataset_root=dataset_root)
+
+    assert len(specs) == 1
+    assert specs[0].run_dir == run_dir
+    assert specs[0].dataset_dir == matched_dataset_dir
+    assert specs[0].name == "rolling_obs6_target2_gap1_horizon24_stride6/hypotension/patch30x1"
+
+
+def test_discover_experiment_specs_matches_vit_baseline_prefix_to_dataset_dir(tmp_path):
+    runs_root = tmp_path / "runs_root"
+    dataset_root = tmp_path / "dataset_root"
+    run_dir, dataset_dir, _, _ = _make_synthetic_run(
+        runs_root / "vit_baseline" / "obs24_target8_gap0" / "hypotension",
+        use_base_as_run_dir=True,
+    )
+    matched_dataset_dir = dataset_root / "obs24_target8_gap0" / "hypotension"
+    matched_dataset_dir.mkdir(parents=True)
+    matched_dataset_dir.joinpath("dataset_metadata.json").write_text(
+        dataset_dir.joinpath("dataset_metadata.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    specs = discover_experiment_specs(runs_root, dataset_root=dataset_root)
+
+    assert len(specs) == 1
+    assert specs[0].run_dir == run_dir
+    assert specs[0].dataset_dir == matched_dataset_dir
+    assert specs[0].name == "vit_baseline/obs24_target8_gap0/hypotension"
 
 
 def test_cmd_report_supports_runs_root(tmp_path):
